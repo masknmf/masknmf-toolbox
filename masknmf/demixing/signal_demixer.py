@@ -1931,7 +1931,7 @@ def merge_signal_groups(
     """
     device = c.device
     keep = torch.ones(c.shape[1], dtype=torch.bool, device=device)
-    keep[torch.as_tensor([int(k) for group in groups for k in group], dtype=torch.long, device=device)] = False
+    keep[torch.as_tensor([k for group in groups for k in group], dtype=torch.long, device=device)] = False
     keep = torch.nonzero(keep).squeeze(1)
     a_kept = csr_index_select_cols(a, keep)
     rows = [decompress_csr_rows(a_kept.crow_indices(), a_kept.values().numel())]
@@ -1940,7 +1940,7 @@ def merge_signal_groups(
     traces = [torch.index_select(c, 1, keep)]
     for i, group in enumerate(groups):
         logger.debug(f"merging {group}")
-        members = torch.as_tensor(sorted(int(k) for k in group), dtype=torch.long, device=device)
+        members = torch.as_tensor(sorted(group), dtype=torch.long, device=device)
         a_rank1, c_rank1 = rank_1_NMF_fit(csr_index_select_cols(a, members), torch.index_select(c, 1, members))
         pixels = torch.nonzero(a_rank1[:, 0]).squeeze(1)
         rows.append(pixels)
@@ -2392,7 +2392,7 @@ class SignalDemixer:
         if merge_indices:
             is_merged = np.zeros(a.shape[1], dtype=bool)
             is_merged[[int(k) for group in merge_indices for k in group]] = True
-            a, c = merge_signal_groups(a, c.to(a.device), merge_indices)
+            a, c = merge_signal_groups(a, c, merge_indices)
             # NOTE: the merged signals left their columns, so each dropped index moves down past them
             drop = [int(k) - int(is_merged[: int(k)].sum()) for k in drop or ()]
         if drop:

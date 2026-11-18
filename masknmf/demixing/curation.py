@@ -39,17 +39,16 @@ def update_signals(
         DemixingResults after the NMF pass over the remaining, merged and added signals
     """
     drop = sorted({int(i) for i in drop}) if drop else []
-    merge_indices = [sorted(int(i) for i in group) for group in merge_indices]
-    merged = [i for group in merge_indices for i in group]
+    merged = [int(i) for group in merge_indices for i in group]
     num_masks = 0 if masks is None else masks.shape[-1]
     if num_masks == 0 and not drop and not merge_indices:
         raise ValueError("nothing to do: no masks to add, no signals to drop and none to merge")
-    if num_masks == 0 and not merge_indices and len(drop) >= results.spatial_demixed.shape[1]:
-        raise ValueError("dropping every signal leaves nothing to demix")
     if any(len(group) < 2 for group in merge_indices):
         raise ValueError("each merge group needs two or more signals")
     if len(set(merged)) != len(merged) or set(merged) & set(drop):
         raise ValueError("merge groups must not share a signal with each other or with drop")
+    if num_masks == 0 and len(drop) >= results.spatial_demixed.shape[1]:
+        raise ValueError("dropping every signal leaves nothing to demix")
     demixer = SignalDemixer.from_results(
         results, device=device, frame_batch_size=frame_batch_size, drop=drop, merge_indices=merge_indices
     )
