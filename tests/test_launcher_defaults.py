@@ -412,3 +412,13 @@ def test_the_nmf_signal_sign_is_a_choice():
     sign = next(p for p in params if p.field == "sign")
     assert tuple(sign.choices) == ("positive", "negative", "unconstrained")
 
+
+def test_a_served_run_goes_to_the_background_with_a_log(tmp_path, monkeypatch):
+    monkeypatch.setattr(launcher, "DIR_JOBS", tmp_path)
+    window = launcher.Launcher()
+    window.start_job(argv=["params", "--help"])
+    process, filepath_log = window.job
+    assert window.job_running() or process.returncode is not None
+    assert process.wait(timeout=120) == 0
+    assert not window.job_running()
+    assert filepath_log.parent == tmp_path and "usage" in filepath_log.read_text()

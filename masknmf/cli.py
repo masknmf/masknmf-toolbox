@@ -969,14 +969,13 @@ def command_serve(args: argparse.Namespace) -> None:
     """
     Serve the demixing viewer of one results file to a browser: rendered on this machine, streamed as frames, with
     the browser's pointer and keys sent back. A folder serves a page listing the results files below it, and the
-    viewer on the one picked there. It listens on localhost; from another machine, tunnel the port over ssh.
+    viewer on the one picked there; no results serves the launcher, whose action runs on this machine in the
+    background. It listens on localhost; from another machine, tunnel the port over ssh.
     --kill and --kill-all stop running servers instead.
     """
     if args.kill is not None or args.kill_all:
         stop_servers(port=None if args.kill_all else args.kill)
         return
-    if args.results is None:
-        fail("serve needs a results file or a folder")
     if os.environ.get("RENDERCANVAS_BACKEND") != "http":
         # NOTE: importing masknmf imports fastplotlib, which fixes its event loop then, so the http loop has to be
         # chosen before this process starts
@@ -990,7 +989,21 @@ def command_serve(args: argparse.Namespace) -> None:
     handler_console.setFormatter(logging.Formatter("%(message)s"))
     # a second figure would open on this machine, where no one sees it
     OPTIONS.separate_image_window = False
-    if Path(args.results).expanduser().is_dir():
+    if args.results is None:
+        from rendercanvas.http import loop
+
+        from masknmf.launcher import ServedLauncher
+
+        server = CanvasServer(
+            ServedLauncher(canvas=BrowserCanvas(size=(1280, 900), update_mode="continuous", max_fps=60.0), loop=loop),
+            title="masknmf",
+            waiting="Opening the launcher ...",
+            host=args.host,
+            port=args.port,
+            key=os.environ.get(SESSION_KEY_ENV),
+        )
+        print(f"the masknmf launcher at {server.url}")
+    elif Path(args.results).expanduser().is_dir():
         if args.raw is not None:
             fail("--raw names one file's movie; serve that results file on its own")
         from masknmf.visualization.results_picker import PickerServer
@@ -1183,7 +1196,7 @@ def build_parser(spec: Optional[scraper.PipelineSpec]) -> argparse.ArgumentParse
     parser_view.set_defaults(handler=command_view)
 
     parser_serve = subparsers.add_parser("serve", help="serve the demixing viewer to a browser")
-    parser_serve.add_argument("results", nargs="?", default=None, help="a results .hdf5 file, or a folder: its results files are listed in the browser to pick from")
+    parser_serve.add_argument("results", nargs="?", default=None, help="a results .hdf5 file, or a folder: its results files are listed in the browser to pick from; none serves the launcher")
     parser_serve.add_argument("--raw", default=None, help=f"the raw movie the results came from; {adapter_raw_sources()}")
     parser_serve.add_argument("--dataset", default=None)
     parser_serve.add_argument("--fs", default=None, type=float, help="acquisition rate in Hz")

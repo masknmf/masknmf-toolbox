@@ -69,6 +69,30 @@ def test_a_served_figure_streams_frames_only_to_the_key_and_goes_still():
     asyncio.run(stream(server))
 
 
+async def stream_launcher(server, served):
+    await Lifespan(server.asgi).start()
+    browser = Browser(server.asgi, headers=KEY)
+    await browser.connect()
+    await browser.resize(1000, 700)
+    await frame_of_size(browser, (1000, 700))
+    # Esc on the Overview closes the window on a desktop; a served page stays
+    served.launcher.quit()
+    await frame_of_size(browser, (1000, 700))
+    assert not served.figure.canvas.get_closed()
+    await browser.disconnect()
+    server.close()
+
+
+def test_the_served_launcher_streams_frames_and_keeps_its_page_open():
+    from rendercanvas.http import loop
+
+    from masknmf.launcher import ServedLauncher
+
+    served = ServedLauncher(canvas=BrowserCanvas(size=(1000, 700), update_mode="continuous", max_fps=60.0), loop=loop)
+    server = CanvasServer(served, title="masknmf", waiting="Opening ...", host="127.0.0.1", port=0, key="sesame")
+    asyncio.run(stream_launcher(server, served))
+
+
 def write_results(path, groups):
     import h5py
 

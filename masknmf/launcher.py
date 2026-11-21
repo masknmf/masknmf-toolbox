@@ -13,11 +13,13 @@ import copy
 import dataclasses
 import glob
 import json
+import re
 import sys
 import threading
 import time
 import typing
 from pathlib import Path
+from types import SimpleNamespace
 
 import imgui_bundle
 import imgui_data_loader as idl
@@ -105,6 +107,9 @@ THEME = idl.Theme.dark().replace(
 DIR_FONTS = Path(imgui_bundle.__file__).parent / "assets" / "fonts"
 FONT_SIZE = 14
 SIZE_WINDOW = (1040, 720)
+# logs of the commands a served launcher runs in the background
+DIR_JOBS = DIR_CONFIG / "jobs"
+BYTES_LOG_TAIL = 4096
 SIZE_MIN = (62 * FONT_SIZE, 44 * FONT_SIZE)
 
 WIDTH_INPUT_EM = 7.5
@@ -631,6 +636,11 @@ class Launcher:
         # editors closed in the last frame, whose textures that frame still drew
         self.editors_closed: list[PixelMaskEditor] = []
         self.renderer: Optional[ImguiRenderer] = None
+        # served to a browser, nobody sees a native dialog, the page has no Quit and outlives the command it starts
+        self.native_dialogs = NATIVE_DIALOGS
+        self.served = False
+        # the command started in the background and its log
+        self.job: Optional[tuple[Any, Path]] = None
         self.argv: Optional[list[str]] = None
         # set to open the Parameters popup on the next frame of Run pipeline; the popup's height outside its columns
         # (title, runtime, buttons) as last drawn, which caps how tall a column grows before it scrolls
@@ -1240,10 +1250,10 @@ class Launcher:
 
     def quit(self) -> None:
         """Close the window once the current frame is done; an action sets argv first, while Esc and Quit leave it None."""
-        if self.canvas is not None:
+        if self.canvas is not None and not self.served:
             self.loop.call_soon(self.canvas.close)
 
-    def attach(self, canvas, loop) -> None:
+    def attach(self, canvas, loop, keep_minimum_size: bool = True) -> None:
         """
         Draw the launcher into a rendercanvas the way fastplotlib draws its imgui figures.
 
@@ -1251,8 +1261,10 @@ class Launcher:
         destroys the texture the frame is drawn into.
 
         Args:
-            canvas (BaseRenderCanvas): The canvas; its logical size is kept at least SIZE_MIN times the UI scale
+            canvas (BaseRenderCanvas): The canvas
             loop (BaseLoop): The loop running the canvas
+            keep_minimum_size (bool): Keep the canvas's logical size at least SIZE_MIN times the UI scale; a browser
+                sets the size of a served canvas itself
         """
         self.canvas = canvas
         self.loop = loop
@@ -1262,7 +1274,8 @@ class Launcher:
         self.font = load_fonts()
         apply_theme()
         self.renderer.set_gui(self.draw_window)
-        canvas.add_event_handler(self.keep_minimum_size, "resize")
+        if keep_minimum_size:
+            canvas.add_event_handler(self.keep_minimum_size, "resize")
         canvas.request_draw(self.renderer.render)
 
     def keep_minimum_size(self, event: dict) -> None:
@@ -1378,6 +1391,32 @@ class Launcher:
         if imgui.is_item_hovered(imgui.HoveredFlags_.allow_when_disabled):
             idl.wrapped_tooltip("Threshold and paint the pixels to leave out; Apply fills this row" if ready else "Choose the movie first")
         imgui.same_line(0, imgui.get_style().item_inner_spacing.x)
+
+    def start_job(self, argv: list[str]) -> None:
+        """Run a masknmf command in a process of its own, logged to a file under DIR_JOBS, while the launcher stays open."""
+        DIR_JOBS.mkdir(parents=True, exist_ok=True)
+        filepath_log = DIR_JOBS / f"{time.strftime('%Y%m%dT%H%M%S')}_{argv[0]}.log"
+        self.job = (cli.launch_viewer(argv=argv, filepath_log=filepath_log), filepath_log)
+
+    def job_running(self) -> bool:
+        """Whether the command started in the background is still running."""
+        return self.job is not None and self.job[0].poll() is None
+
+    def draw_job(self) -> None:
+        """The background command's state and the last line of its log; its log's path on hover."""
+        process, filepath_log = self.job
+        with filepath_log.open("rb") as file:
+            file.seek(max(0, filepath_log.stat().st_size - BYTES_LOG_TAIL))
+            tail = file.read().decode("utf-8", errors="replace")
+        lines = [line.strip() for line in re.split(r"[\r\n]", re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", tail)) if line.strip()]
+        last = lines[-1] if len(lines) > 0 else ""
+        if process.poll() is None:
+            draw_wrapped(text=f"{fa.ICON_FA_GEARS}  running: {last}", color=COLOR_SUBSECTION)
+        else:
+            color = COLOR_DIM if process.returncode == 0 else COLOR_WARN
+            draw_wrapped(text=f"{fa.ICON_FA_CIRCLE_INFO}  finished, exit {process.returncode}: {last}", color=color)
+        if imgui.is_item_hovered():
+            idl.wrapped_tooltip(f"log: {filepath_log}")
 
     def draw_header(self) -> None:
         """The name and version, then what masknmf does."""
@@ -2465,22 +2504,22 @@ class Launcher:
             hint (str): Shown while the field is empty
         """
         inner = imgui.get_style().item_inner_spacing.x
-        no_dialog = "no file dialog on this machine; type the path instead"
+        no_dialog = "no file dialog here; type the path instead"
         if filetypes is not None:
-            imgui.begin_disabled(not NATIVE_DIALOGS)
+            imgui.begin_disabled(not self.native_dialogs)
             if imgui.button(f"{fa.ICON_FA_FILE}##file_{key}"):
                 self.open_picker(target=target, key=key, filetypes=filetypes)
             imgui.end_disabled()
             if imgui.is_item_hovered(imgui.HoveredFlags_.allow_when_disabled):
-                idl.wrapped_tooltip("Browse for a file" if NATIVE_DIALOGS else no_dialog)
+                idl.wrapped_tooltip("Browse for a file" if self.native_dialogs else no_dialog)
             imgui.same_line(0, inner)
         if folders:
-            imgui.begin_disabled(not NATIVE_DIALOGS)
+            imgui.begin_disabled(not self.native_dialogs)
             if imgui.button(f"{fa.ICON_FA_FOLDER_OPEN}##folder_{key}"):
                 self.open_picker(target=target, key=key, filetypes=None)
             imgui.end_disabled()
             if imgui.is_item_hovered(imgui.HoveredFlags_.allow_when_disabled):
-                idl.wrapped_tooltip("Browse for a folder" if NATIVE_DIALOGS else no_dialog)
+                idl.wrapped_tooltip("Browse for a folder" if self.native_dialogs else no_dialog)
             imgui.same_line(0, inner)
 
         padding = imgui.get_style().frame_padding
@@ -2570,9 +2609,9 @@ class Launcher:
         label = self.label_primary()
         spacing = imgui.get_style().item_spacing.x
         padding = 2 * imgui.get_style().frame_padding.x
-        width_quit = imgui.calc_text_size("Quit").x + padding + 1.5 * em
+        width_quit = 0.0 if self.served else imgui.calc_text_size("Quit").x + padding + 1.5 * em
         width_primary = imgui.calc_text_size(label).x + padding + 1.5 * em if label is not None else 0.0
-        width_buttons = width_quit + (spacing + width_primary if label is not None else 0.0)
+        width_buttons = width_quit + width_primary + (spacing if width_quit > 0 and width_primary > 0 else 0.0)
         height = 1.7 * em
         if not imgui.begin_table("##footer", 2, imgui.TableFlags_.sizing_stretch_prop):
             return
@@ -2580,6 +2619,8 @@ class Launcher:
         imgui.table_setup_column("##buttons", imgui.TableColumnFlags_.width_fixed, width_buttons)
         imgui.table_next_row()
         imgui.table_next_column()
+        if self.job is not None:
+            self.draw_job()
         if len(problems) > 0 and label is not None:
             for problem in problems[:3]:
                 idl.text_wrapped_colored(COLOR_WARN, f"{fa.ICON_FA_CIRCLE_INFO}  {problem}")
@@ -2593,19 +2634,24 @@ class Launcher:
         else:
             idl.text_wrapped_colored(COLOR_DIM, "pick a function on the left; the command it amounts to shows here before it runs")
         imgui.table_next_column()
-        idl.push_button_style(dialog.theme, primary=False)
-        if imgui.button("Quit", imgui.ImVec2(width_quit, height)):
-            dialog.cancel()
-        idl.pop_button_style()
+        if not self.served:
+            idl.push_button_style(dialog.theme, primary=False)
+            if imgui.button("Quit", imgui.ImVec2(width_quit, height)):
+                dialog.cancel()
+            idl.pop_button_style()
         if label is not None:
-            imgui.same_line()
+            if not self.served:
+                imgui.same_line()
             with button_colors(COLORS_RUN[0], COLORS_RUN[1]):
-                imgui.begin_disabled(len(problems) > 0)
+                imgui.begin_disabled(len(problems) > 0 or self.job_running())
                 if imgui.button(label, imgui.ImVec2(width_primary, height)):
                     if self.page == "open":
                         self.store.record_selection(idl.DialogResult(paths=[self.paths_open["source"].strip()]))
-                    self.argv = argv
-                    self.quit()
+                    if self.served:
+                        self.start_job(argv=argv)
+                    else:
+                        self.argv = argv
+                        self.quit()
                 imgui.end_disabled()
         imgui.end_table()
 
@@ -2631,6 +2677,33 @@ def run_launcher() -> Optional[list[str]]:
     if window.picker is not None:
         window.picker.kill()
     return window.argv
+
+
+class ServedLauncher:
+    """
+    The launcher on a browser canvas, in the shape CanvasServer serves: no native dialogs, and its action runs in the
+    background so the page stays open.
+    """
+
+    def __init__(self, canvas, loop):
+        """
+        Args:
+            canvas (BrowserCanvas): The canvas the browser shows
+            loop (BaseLoop): rendercanvas's http loop
+        """
+        self.launcher = Launcher()
+        self.launcher.native_dialogs = False
+        self.launcher.served = True
+        self.loop = loop
+        # CanvasServer reads the canvas from figure.canvas, as on a fastplotlib figure
+        self.figure = SimpleNamespace(canvas=canvas)
+
+    def show(self) -> None:
+        """Start drawing the launcher on the canvas."""
+        self.launcher.attach(canvas=self.figure.canvas, loop=self.loop, keep_minimum_size=False)
+
+    def close(self) -> None:
+        """Nothing to release: the background command outlives the page."""
 
 
 class MaskEditorWindow:
