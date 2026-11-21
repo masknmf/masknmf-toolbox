@@ -1,18 +1,22 @@
 """
-Pixel mask editor: a hello_imgui window that thresholds the mean and temporal SD images of a movie, cleans the
-result, takes brush edits, and saves a boolean (height, width) .npy that is True on the pixels a pipeline uses.
+Pixel mask editor: imgui contents that threshold the mean and temporal SD images of a movie, clean the result, take
+brush edits, and save a boolean (height, width) .npy that is True on the pixels a pipeline uses.
 
-``masknmf mask movie.tif`` opens it; the launcher opens it from the pixel mask row and fills in the saved path.
-The mask functions are plain numpy and need no window.
+The editor draws into any imgui frame whose renderer is wgpu's ``ImguiRenderer``: the launcher opens it as a page
+from the pixel mask row and fills in the saved path, in its own window or served to a browser, and ``masknmf mask
+movie.tif`` opens it in a window of its own (``masknmf.launcher.run_mask_editor``). The mask functions are plain numpy
+and need no window.
 """
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import scipy.ndimage
 import torch
-from imgui_bundle import hello_imgui, imgui, immvision
+import wgpu
+from imgui_bundle import hello_imgui, imgui
 
 from masknmf.io import load_movie
 from masknmf.motion_correction.moco_preprocessing import dilate_saturation_mask
@@ -25,6 +29,10 @@ COLOR_MASKED = np.array([255.0, 40.0, 40.0], dtype=np.float32)
 PERCENTILES_DISPLAY = (1.0, 99.8)
 WIDTH_PANEL_EM = 21.0
 SIZE_WINDOW = (1150, 780)
+# texels on the texture's long side at least; wgpu's imgui backend samples linearly, so each pixel is repeated to keep
+# its edges sharp when the image is drawn larger than the movie
+TEXELS_LONG_SIDE = 1024
+MAX_REPEAT = 8
 
 
 @dataclass
@@ -173,10 +181,74 @@ def compose_rgb(image: np.ndarray, keep: np.ndarray, opacity: float) -> np.ndarr
     return np.ascontiguousarray(rgb.astype(np.uint8))
 
 
-class PixelMaskEditor:
-    """The editor's state and its window contents."""
+def load_images(filepath_movie: str, dataset: str | None = None, num_frames: int = 400) -> dict[str, np.ndarray]:
+    """
+    The mean and temporal SD images of a movie, from evenly spaced frames.
 
-    def __init__(self, images: dict[str, np.ndarray], filepath_out: str):
+    Parameters
+    ----------
+    filepath_movie : str
+        Anything ``masknmf.io.load_movie`` reads.
+    dataset : str, optional
+        The dataset holding the movie in an hdf5 file.
+    num_frames : int
+        Upper bound on the frames read.
+
+    Returns
+    -------
+    dict[str, np.ndarray]
+        "mean" and "sd", each shape (height, width).
+    """
+    return summary_images(frames=sample_frames(movie=load_movie(filepath_movie, dataset), num_frames=num_frames))
+
+
+class ImageTexture:
+    """An rgb image in a wgpu texture registered with an imgui backend, each pixel repeated to keep its edges sharp."""
+
+    def __init__(self, backend, shape: tuple[int, int]):
+        """
+        Parameters
+        ----------
+        backend : wgpu.utils.imgui.ImguiWgpuBackend
+            The backend of the ``ImguiRenderer`` that draws the image.
+        shape : tuple[int, int]
+            (height, width) of the images uploaded.
+        """
+        height, width = shape
+        self.repeat = int(min(MAX_REPEAT, max(1, math.ceil(TEXELS_LONG_SIDE / max(height, width)))))
+        self.device = wgpu.utils.get_default_device()
+        self.backend = backend
+        self.size = (width * self.repeat, height * self.repeat, 1)
+        self.texture = self.device.create_texture(
+            size=self.size,
+            usage=wgpu.TextureUsage.COPY_DST | wgpu.TextureUsage.TEXTURE_BINDING,
+            dimension=wgpu.TextureDimension.d2,
+            format=wgpu.TextureFormat.rgba8unorm,
+            mip_level_count=1,
+            sample_count=1,
+        )
+        self.ref = backend.register_texture(self.texture.create_view())
+
+    def upload(self, rgb: np.ndarray) -> None:
+        """Write rgb, uint8 of shape (height, width, 3), to the texture."""
+        rgb = np.repeat(np.repeat(rgb, self.repeat, axis=0), self.repeat, axis=1)
+        rgba = np.concatenate([rgb, np.full(rgb.shape[:2] + (1,), 255, dtype=np.uint8)], axis=2)
+        self.device.queue.write_texture(
+            {"texture": self.texture, "mip_level": 0, "origin": (0, 0, 0)},
+            np.ascontiguousarray(rgba),
+            {"offset": 0, "bytes_per_row": self.size[0] * 4},
+            self.size,
+        )
+
+    def release(self) -> None:
+        """Unregister the texture from the backend."""
+        self.backend.unregister_texture(self.ref)
+
+
+class PixelMaskEditor:
+    """The editor's state and its contents, drawn into the current imgui window."""
+
+    def __init__(self, images: dict[str, np.ndarray], filepath_out: str, backend=None):
         """
         Parameters
         ----------
@@ -184,9 +256,13 @@ class PixelMaskEditor:
             The "mean" and "sd" images, each shape (height, width).
         filepath_out : str
             Where Apply saves the mask.
+        backend : wgpu.utils.imgui.ImguiWgpuBackend, optional
+            The backend of the renderer drawing the editor; the image texture is made on it at the first frame.
         """
         self.images = images
         self.filepath_out = filepath_out
+        self.backend = backend
+        self.texture = None
         self.params = MaskParams()
         self.sigma_smoothed = None
         self.images_smoothed = images
@@ -197,18 +273,10 @@ class PixelMaskEditor:
         self.brush_on = False
         self.brush_radius = 6.0
         self.applied = False
+        self.closed = False
         self.dirty = True
         self.hidden = False
         self.rgb = None
-        self.view = immvision.ImageParams()
-        self.view.show_options_button = False
-        self.view.show_image_info = False
-        self.view.show_pixel_info = False
-        self.view.show_zoom_buttons = False
-        self.view.can_resize = False
-        self.view.add_watched_pixel_on_double_click = False
-        self.view.draw_values_on_zoomed_pixels = False
-        self.view.show_grid = False
 
     def update(self) -> None:
         """Recompute the mask and its picture after a change."""
@@ -220,8 +288,23 @@ class PixelMaskEditor:
             self.sigma_smoothed = self.params.sigma
         self.keep = apply_brush(keep=compute_mask(images=self.images_smoothed, params=self.params), brush=self.brush)
         self.rgb = compose_rgb(image=self.images[self.shown], keep=self.keep, opacity=0.0 if self.hidden else self.opacity)
-        self.view.refresh_image = True
+        if self.texture is None:
+            self.texture = ImageTexture(backend=self.backend, shape=self.keep.shape)
+        self.texture.upload(rgb=self.rgb)
         self.dirty = False
+
+    def close(self, applied: bool) -> None:
+        """Save the mask when applied and mark the editor closed; the host calls release once the frame is drawn."""
+        if applied:
+            self.save()
+        self.applied = applied
+        self.closed = True
+
+    def release(self) -> None:
+        """Unregister the image texture; the frame that drew it must be rendered first."""
+        if self.texture is not None:
+            self.texture.release()
+            self.texture = None
 
     def save(self) -> None:
         """Write the mask to filepath_out."""
@@ -271,7 +354,7 @@ class PixelMaskEditor:
         if imgui.is_key_pressed(imgui.Key.b) and not imgui.get_io().want_text_input:
             self.brush_on = not self.brush_on
         _, self.brush_radius = imgui.slider_float("radius (px)", self.brush_radius, 1.0, 50.0, "%.0f")
-        imgui.text_disabled("left drag masks, right drag keeps" if self.brush_on else "left drag pans, wheel zooms")
+        imgui.text_disabled("left drag masks, right drag keeps" if self.brush_on else "B or the box turns the brush on")
         imgui.begin_disabled(not self.brush.any())
         if imgui.button("Clear brush edits"):
             self.brush[:] = 0
@@ -304,37 +387,39 @@ class PixelMaskEditor:
             imgui.set_tooltip(self.filepath_out)
         width_button = (imgui.get_content_region_avail().x - imgui.get_style().item_spacing.x) / 2
         if imgui.button("Apply", imgui.ImVec2(width_button, 0)):
-            self.save()
-            self.applied = True
-            hello_imgui.get_runner_params().app_shall_exit = True
+            self.close(applied=True)
         imgui.same_line()
         if imgui.button("Cancel", imgui.ImVec2(width_button, 0)):
-            hello_imgui.get_runner_params().app_shall_exit = True
+            self.close(applied=False)
 
     def draw_image(self) -> None:
         """The picture, fit to the room left of the panel, with the brush on it."""
         avail = imgui.get_content_region_avail()
         height, width = self.keep.shape
         scale_fit = max(min(avail.x / width, avail.y / height), 0.05)
-        self.view.image_display_size = (int(width * scale_fit), int(height * scale_fit))
-        self.view.pan_with_mouse = not self.brush_on
-        immvision.image("##pixel_mask", self.rgb, self.view)
-
-        mouse = self.view.mouse_info
-        if not (self.brush_on and mouse.is_mouse_hovering):
+        size = imgui.ImVec2(width * scale_fit, height * scale_fit)
+        corner = imgui.get_cursor_screen_pos()
+        imgui.image(self.texture.ref, size)
+        # a button over the image owns the drag, so the stroke goes on when the pointer leaves the image's hover
+        imgui.set_cursor_screen_pos(corner)
+        imgui.invisible_button("##brush", size, imgui.ButtonFlags_.mouse_button_left | imgui.ButtonFlags_.mouse_button_right)
+        if not (self.brush_on and (imgui.is_item_hovered() or imgui.is_item_active())):
             return
-        zoom = float(self.view.zoom_pan_matrix[0][0])
+        mouse = imgui.get_mouse_pos()
         imgui.get_foreground_draw_list().add_circle(
-            imgui.get_mouse_pos(), self.brush_radius * zoom, imgui.get_color_u32(imgui.ImVec4(1.0, 1.0, 1.0, 0.9))
+            mouse, self.brush_radius * scale_fit, imgui.get_color_u32(imgui.ImVec4(1.0, 1.0, 1.0, 0.9))
         )
         value = 1 if imgui.is_mouse_down(imgui.MouseButton_.left) else 2 if imgui.is_mouse_down(imgui.MouseButton_.right) else 0
         if value != 0:
-            col, row = mouse.mouse_position
+            # pixel centres sit at integer positions, so the pixel under the pointer is the one rounding gives
+            col, row = (mouse.x - corner.x) / scale_fit - 0.5, (mouse.y - corner.y) / scale_fit - 0.5
             paint_disk(target=self.brush, row=row, col=col, radius=self.brush_radius, value=value)
             self.dirty = True
 
     def gui(self) -> None:
         """One frame: the image on the left, the settings on the right."""
+        if self.closed:
+            return
         if self.dirty:
             self.update()
         width_panel = hello_imgui.em_size(WIDTH_PANEL_EM)
@@ -351,45 +436,3 @@ def default_mask_path(filepath_movie: str) -> str:
     """The mask file beside a movie: <movie name>_pixel_mask.npy."""
     path = Path(filepath_movie).expanduser()
     return str(path.with_name(path.stem + "_pixel_mask.npy"))
-
-
-def edit_pixel_mask(
-    filepath_movie: str,
-    filepath_out: str | None = None,
-    dataset: str | None = None,
-    num_frames: int = 400,
-) -> str | None:
-    """
-    Open the editor on a movie and block until it closes.
-
-    Parameters
-    ----------
-    filepath_movie : str
-        Anything ``masknmf.io.load_movie`` reads.
-    filepath_out : str, optional
-        Where Apply saves the mask. ``None`` saves beside the movie.
-    dataset : str, optional
-        The dataset holding the movie in an hdf5 file.
-    num_frames : int
-        Evenly spaced frames the mean and SD images are computed from.
-
-    Returns
-    -------
-    str | None
-        The saved file, or None when the window closed without Apply.
-    """
-    if filepath_out is None:
-        filepath_out = default_mask_path(filepath_movie=filepath_movie)
-    frames = sample_frames(movie=load_movie(filepath_movie, dataset), num_frames=num_frames)
-    editor = PixelMaskEditor(images=summary_images(frames=frames), filepath_out=filepath_out)
-    del frames
-
-    immvision.use_rgb_color_order()
-    runner = hello_imgui.RunnerParams()
-    runner.app_window_params.window_title = f"Pixel mask - {Path(filepath_movie).name}"
-    runner.app_window_params.window_geometry.size = SIZE_WINDOW
-    runner.imgui_window_params.tweaked_theme = hello_imgui.ImGuiTweakedTheme(theme=hello_imgui.ImGuiTheme_.darcula_darker)
-    runner.ini_disable = True
-    runner.callbacks.show_gui = editor.gui
-    hello_imgui.run(runner)
-    return filepath_out if editor.applied else None

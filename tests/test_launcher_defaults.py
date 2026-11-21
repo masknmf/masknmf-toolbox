@@ -10,7 +10,6 @@ import dataclasses
 import io
 import json
 import logging
-import time
 from functools import partial
 from pathlib import Path
 from typing import Literal, Optional
@@ -24,6 +23,7 @@ from masknmf import cli, launcher
 from masknmf.pipelines import scraper
 from masknmf.pipelines._base import BasePipeline
 from masknmf.pipelines.configs.demixing_configs import NMFConfig
+from masknmf.visualization.pixel_mask import PixelMaskEditor
 
 SLUGS = sorted(scraper.pipeline_registry())
 
@@ -357,13 +357,14 @@ def test_switching_pipeline_from_a_card_mid_frame_draws_on(monkeypatch):
     assert_untouched(window=window)
 
 
-class ExitedProcess:
-    """The pixel mask editor's process after its window closed."""
-
-    returncode = 0
-
-    def poll(self):
-        return self.returncode
+def open_mask_page(window, filepath: Path):
+    """The editor's page open on a 4 x 4 movie, as the launcher has it once the movie is read."""
+    images = {"mean": np.ones((4, 4)), "sd": np.ones((4, 4))}
+    editor = PixelMaskEditor(images=images, filepath_out=str(filepath))
+    window.mask_page = launcher.MaskPage(
+        key="pixel_mask", filepath_movie="movie.tif", filepath_out=str(filepath), images=images, editor=editor
+    )
+    return editor
 
 
 def test_launcher_fills_the_row_only_after_apply(tmp_path):
@@ -371,14 +372,13 @@ def test_launcher_fills_the_row_only_after_apply(tmp_path):
     assert "pixel_mask" in window.paths
     filepath = tmp_path / "movie_pixel_mask.npy"
 
-    window.mask_editor = (ExitedProcess(), "pixel_mask", str(filepath), time.time())
-    window.poll_mask_editor()
-    assert window.paths["pixel_mask"] == "" and window.mask_editor is None
+    open_mask_page(window=window, filepath=filepath).close(applied=False)
+    window.close_mask_page()
+    assert window.paths["pixel_mask"] == "" and window.mask_page is None and not filepath.exists()
 
-    opened = time.time() - 1
-    np.save(filepath, np.ones((4, 4), dtype=bool))
-    window.mask_editor = (ExitedProcess(), "pixel_mask", str(filepath), opened)
-    window.poll_mask_editor()
+    open_mask_page(window=window, filepath=filepath).close(applied=True)
+    window.close_mask_page()
+    assert np.load(filepath).all()
     assert window.paths["pixel_mask"] == str(filepath)
     argv = window.argv_run()
     assert argv[argv.index("--pixel-mask") + 1] == str(filepath)
@@ -411,3 +411,4 @@ def test_the_nmf_signal_sign_is_a_choice():
     params = scraper.scrape_dataclass(cls_config=NMFConfig, name_section="nmf")
     sign = next(p for p in params if p.field == "sign")
     assert tuple(sign.choices) == ("positive", "negative", "unconstrained")
+

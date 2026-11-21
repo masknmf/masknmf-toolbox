@@ -1055,9 +1055,11 @@ def command_train_denoiser(args: argparse.Namespace) -> None:
 
 def command_mask(args: argparse.Namespace) -> None:
     """Open the pixel mask editor on a movie; Apply saves the mask for masknmf run --pixel-mask."""
-    from masknmf.visualization.pixel_mask import edit_pixel_mask
+    from masknmf.launcher import run_mask_editor
+    from masknmf.visualization.pixel_mask import default_mask_path
 
-    filepath = edit_pixel_mask(filepath_movie=args.movie, filepath_out=args.out, dataset=args.dataset, num_frames=args.frames)
+    filepath_out = default_mask_path(filepath_movie=args.movie) if args.out is None else args.out
+    filepath = run_mask_editor(filepath_movie=args.movie, filepath_out=filepath_out, dataset=args.dataset, num_frames=args.frames)
     if filepath is None:
         print("closed without Apply; no mask saved")
     else:

@@ -37,7 +37,8 @@ from masknmf.pipelines._base import BasePipeline
 from masknmf.visualization.imgui import guide, param_hints
 from masknmf.visualization.imgui.clipboard import connect_clipboard
 from masknmf.visualization.imgui.files import NATIVE_DIALOGS, Picker
-from masknmf.visualization.pixel_mask import default_mask_path
+from masknmf.visualization.pixel_mask import SIZE_WINDOW as SIZE_WINDOW_MASK
+from masknmf.visualization.pixel_mask import PixelMaskEditor, default_mask_path, load_images
 from masknmf.visualization.imgui.scale import DIR_CONFIG, Scaler, fit_canvas, push_font_em
 from masknmf.visualization.imgui.theme import button_colors, tooltip
 from masknmf.visualization.imgui.widgets import draw_min_brightness
@@ -391,6 +392,27 @@ def is_hdf5(filepath: str) -> bool:
     return Path(filepath).suffix.lower() in cli.SUFFIXES_HDF5
 
 
+@dataclasses.dataclass
+class MaskPage:
+    """The pixel mask editor open on the movie of one pixel mask row; images and error are set by its reading thread."""
+
+    key: str
+    filepath_movie: str
+    filepath_out: str
+    images: Optional[dict] = None
+    error: str = ""
+    editor: Optional[PixelMaskEditor] = None
+
+
+def read_mask_images(page: MaskPage, dataset: Optional[str]) -> None:
+    """Set page.images to its movie's mean and SD images, or page.error to why the movie could not be read."""
+    try:
+        page.images = load_images(filepath_movie=page.filepath_movie, dataset=dataset)
+    # NOTE: this runs in a thread the page waits on, so an exception left to itself would leave the page waiting
+    except Exception as error:
+        page.error = f"{type(error).__name__}: {error}"
+
+
 def find_sessions(rows: tuple[str, ...]) -> list[dict]:
     """
     The results files Track sessions' rows name, in row order: a folder stands for every PATTERN_RESULTS in it and
@@ -604,9 +626,11 @@ class Launcher:
         self.steps_denoiser = 500
         self.picker = None
         self.target_picker: Optional[tuple[dict, str]] = None
-        # the pixel mask editor's process, the row it fills, the file it saves and when it opened
-        self.mask_editor: Optional[tuple[Any, str, str, float]] = None
-        self.message_mask = ""
+        # the pixel mask editor drawn in place of the page, while it is open
+        self.mask_page: Optional[MaskPage] = None
+        # editors closed in the last frame, whose textures that frame still drew
+        self.editors_closed: list[PixelMaskEditor] = []
+        self.renderer: Optional[ImguiRenderer] = None
         self.argv: Optional[list[str]] = None
         # set to open the Parameters popup on the next frame of Run pipeline; the popup's height outside its columns
         # (title, runtime, buttons) as last drawn, which caps how tall a column grows before it scrolls
@@ -1233,13 +1257,13 @@ class Launcher:
         self.canvas = canvas
         self.loop = loop
         self.dialog = idl.FileDialog(self.config)
-        renderer = ImguiRenderer(wgpu.utils.get_default_device(), canvas)
-        connect_clipboard(renderer.imgui_context)
+        self.renderer = ImguiRenderer(wgpu.utils.get_default_device(), canvas)
+        connect_clipboard(self.renderer.imgui_context)
         self.font = load_fonts()
         apply_theme()
-        renderer.set_gui(self.draw_window)
+        self.renderer.set_gui(self.draw_window)
         canvas.add_event_handler(self.keep_minimum_size, "resize")
-        canvas.request_draw(renderer.render)
+        canvas.request_draw(self.renderer.render)
 
     def keep_minimum_size(self, event: dict) -> None:
         """Resize the canvas back up to SIZE_MIN, times the UI scale, when it is made smaller."""
@@ -1259,7 +1283,13 @@ class Launcher:
         flags = imgui.WindowFlags_.no_decoration | imgui.WindowFlags_.no_move | imgui.WindowFlags_.no_saved_settings
         imgui.begin("##masknmf_launcher", None, flags)
         imgui.pop_style_color()
-        self.dialog.render()
+        for editor in self.editors_closed:
+            editor.release()
+        self.editors_closed = []
+        if self.mask_page is not None:
+            self.draw_mask_page()
+        else:
+            self.dialog.render()
         imgui.end()
         imgui.pop_font()
 
@@ -1300,44 +1330,53 @@ class Launcher:
         return next(self.paths[p.field].strip() for p in self.spec.movie_params if p.field.startswith(prefix))
 
     def open_mask_editor(self, key: str) -> None:
-        """Open the pixel mask editor on the movie of the row key, in a process of its own."""
+        """Read the movie of the row key in a thread, then show the pixel mask editor on it in place of the page."""
         movie = self.movie_for_mask(key=key)
-        filepath_out = default_mask_path(filepath_movie=movie)
-        argv = ["mask", movie, "--out", filepath_out]
-        if is_hdf5(filepath=movie):
-            argv += ["--dataset", self.dataset.strip()]
-        process = cli.launch_viewer(argv=argv, filepath_log=DIR_CONFIG / "mask_editor.log")
-        self.mask_editor = (process, key, filepath_out, time.time())
-        self.message_mask = ""
+        page = MaskPage(key=key, filepath_movie=movie, filepath_out=default_mask_path(filepath_movie=movie))
+        dataset = self.dataset.strip() if is_hdf5(filepath=movie) else None
+        threading.Thread(target=read_mask_images, kwargs={"page": page, "dataset": dataset}, daemon=True).start()
+        self.mask_page = page
 
-    def poll_mask_editor(self) -> None:
-        """Once the editor's window closes, fill its pixel mask row with the file Apply saved."""
-        if self.mask_editor is None:
+    def close_mask_page(self) -> None:
+        """Leave the editor; a mask it applied fills its row."""
+        page = self.mask_page
+        if page.editor is not None:
+            if page.editor.applied:
+                self.paths[page.key] = page.filepath_out
+            self.editors_closed.append(page.editor)
+        self.mask_page = None
+
+    def draw_mask_page(self) -> None:
+        """The editor on the row's movie in place of the launcher's pages, or the reading it waits for."""
+        page = self.mask_page
+        if page.editor is None and page.images is not None:
+            page.editor = PixelMaskEditor(images=page.images, filepath_out=page.filepath_out, backend=self.renderer.backend)
+        imgui.text_colored(COLOR_SUBSECTION, f"{fa.ICON_FA_PAINTBRUSH}  Pixel mask")
+        imgui.same_line()
+        imgui.text_disabled(page.filepath_movie)
+        imgui.separator()
+        if page.editor is not None:
+            page.editor.gui()
+            if page.editor.closed:
+                self.close_mask_page()
             return
-        process, key, filepath_out, time_opened = self.mask_editor
-        if process.poll() is None:
-            return
-        if process.returncode != 0:
-            self.message_mask = f"the mask editor stopped with an error; see {DIR_CONFIG / 'mask_editor.log'}"
-        path = Path(filepath_out)
-        if path.exists() and path.stat().st_mtime >= time_opened:
-            self.paths[key] = filepath_out
-        self.mask_editor = None
+        if page.error != "":
+            draw_wrapped(text=f"{fa.ICON_FA_CIRCLE_INFO}  could not read the movie: {page.error}", color=COLOR_WARN)
+        else:
+            imgui.text_disabled(f"reading frames of {Path(page.filepath_movie).name} ...")
+        if imgui.button("Back"):
+            self.mask_page = None
 
     def draw_mask_button(self, key: str) -> None:
         """The button that opens the pixel mask editor for the row key, ahead of the row's path field."""
         movie = self.movie_for_mask(key=key)
-        ready = movie != "" and Path(movie).expanduser().exists()
-        imgui.begin_disabled(not ready or self.mask_editor is not None)
+        ready = movie != "" and Path(movie).expanduser().exists() and self.renderer is not None
+        imgui.begin_disabled(not ready)
         if imgui.button(f"{fa.ICON_FA_PAINTBRUSH}  Draw##{key}"):
             self.open_mask_editor(key=key)
         imgui.end_disabled()
         if imgui.is_item_hovered(imgui.HoveredFlags_.allow_when_disabled):
-            idl.wrapped_tooltip(
-                "The editor is open; Apply there fills its row" if self.mask_editor is not None
-                else "Threshold and paint the pixels to leave out; Apply fills this row" if ready
-                else "Choose the movie first"
-            )
+            idl.wrapped_tooltip("Threshold and paint the pixels to leave out; Apply fills this row" if ready else "Choose the movie first")
         imgui.same_line(0, imgui.get_style().item_inner_spacing.x)
 
     def draw_header(self) -> None:
@@ -1375,7 +1414,6 @@ class Launcher:
             self.draw_content()
         imgui.pop_style_var()
         self.poll_picker()
-        self.poll_mask_editor()
 
     def draw_rail(self) -> None:
         """One button per page, the current one lit, then the recent paths."""
@@ -1705,8 +1743,6 @@ class Launcher:
                     self.draw_mask_button(key=param.field)
                 self.draw_path(target=self.paths, key=param.field, filetypes=FILETYPES_ARRAY, folders=False,
                                hint="required" if param.required else "optional")
-                if is_mask and self.mask_editor is None and self.message_mask != "":
-                    draw_wrapped(text=f"{fa.ICON_FA_CIRCLE_INFO}  {self.message_mask}", color=COLOR_WARN)
             for param in self.params_folder():
                 self.row(caption="output folder")
                 self.draw_path(target=self.texts, key=param.name, filetypes=None, folders=True, hint="beside the movie")
@@ -2595,3 +2631,64 @@ def run_launcher() -> Optional[list[str]]:
     if window.picker is not None:
         window.picker.kill()
     return window.argv
+
+
+class MaskEditorWindow:
+    """The pixel mask editor alone in a borderless imgui window covering the canvas, at the launcher's UI scale."""
+
+    def __init__(self, editor: PixelMaskEditor, font: imgui.ImFont, canvas, loop):
+        self.editor = editor
+        self.font = font
+        self.canvas = canvas
+        self.loop = loop
+        self.scaler = Scaler()
+
+    def draw(self) -> None:
+        """One frame; the window closes once the editor does."""
+        self.scaler()
+        viewport = imgui.get_main_viewport()
+        imgui.push_font(self.font, self.font.legacy_size)
+        imgui.set_next_window_pos(viewport.pos)
+        imgui.set_next_window_size(viewport.size)
+        flags = imgui.WindowFlags_.no_decoration | imgui.WindowFlags_.no_move | imgui.WindowFlags_.no_saved_settings
+        imgui.begin("##pixel_mask", None, flags)
+        self.editor.gui()
+        imgui.end()
+        imgui.pop_font()
+        if self.editor.closed:
+            self.loop.call_soon(self.canvas.close)
+
+
+def run_mask_editor(filepath_movie: str, filepath_out: str, dataset: Optional[str] = None, num_frames: int = 400) -> Optional[str]:
+    """
+    Open the pixel mask editor on a movie in a window of its own, with the launcher's fonts and theme, and block
+    until it closes.
+
+    Args:
+        filepath_movie (str): Anything masknmf.io.load_movie reads
+        filepath_out (str): Where Apply saves the mask
+        dataset (str | None): The dataset holding the movie in an hdf5 file
+        num_frames (int): Evenly spaced frames the mean and SD images are computed from
+
+    Returns:
+        str | None: The saved file, or None when the window closed without Apply
+    """
+    from rendercanvas.glfw import RenderCanvas, loop
+
+    images = load_images(filepath_movie=filepath_movie, dataset=dataset, num_frames=num_frames)
+    canvas = RenderCanvas(title=f"Pixel mask - {Path(filepath_movie).name}", size=SIZE_WINDOW_MASK, update_mode="continuous", max_fps=60)
+    fit_canvas(canvas)
+    renderer = ImguiRenderer(wgpu.utils.get_default_device(), canvas)
+    connect_clipboard(renderer.imgui_context)
+    font = load_fonts()
+    apply_theme()
+    window = MaskEditorWindow(
+        editor=PixelMaskEditor(images=images, filepath_out=filepath_out, backend=renderer.backend),
+        font=font,
+        canvas=canvas,
+        loop=loop,
+    )
+    renderer.set_gui(window.draw)
+    canvas.request_draw(renderer.render)
+    loop.run()
+    return filepath_out if window.editor.applied else None
