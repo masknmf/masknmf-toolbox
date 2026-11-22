@@ -2,6 +2,7 @@ from . import (
     canvas_server as canvas_server,
     classification_vis as classification_vis,
     compression_vis as compression_vis,
+    contrast as contrast,
     demixing_vis as demixing_vis,
     imgui as imgui,
     motion_vis as motion_vis,

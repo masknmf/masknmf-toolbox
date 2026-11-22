@@ -56,6 +56,7 @@ from masknmf.visualization.imgui.run_record import RECORD_LABEL, RECORD_TIP, dra
 from masknmf.visualization.imgui.scale import scale_figure
 from masknmf.visualization.rois import MARKED_COLOR, SELECTED_ALPHA, FootprintSet
 from masknmf.visualization.summary_widget import SummaryImageViewer
+from masknmf.visualization.contrast import CONTRAST_METHODS
 from masknmf.demixing import CellStats, estimate_temporal_demixed_raw, update_signals, write_curated
 from masknmf.diagnostics import pmd_autocovariance_diagnostics
 from masknmf.pipelines.configs.demixing_configs import NMFConfig
@@ -167,7 +168,8 @@ class SingleSessionDemixingVis:
     the drawn rois. A registration array has no compressed movie to average, so pixel traces and drawn rois
     are off for it.
     ``panel_names`` maps any of those names to the one shown in its place (panel title, Panels matrix,
-    right-click menu). ``canvas`` is the rendercanvas the figure draws on; None opens a window.
+    right-click menu). ``canvas`` is the rendercanvas the figure draws on; None opens a window. ``contrast`` names
+    how each panel fits its color limits, a key of :data:`masknmf.visualization.contrast.CONTRAST_METHODS`.
 
     The Signals table always carries the results' own stats (:meth:`CellStats.from_results`: mean, std, snr
     and skew of each demixed trace; fit, resid and bkgd from the roi averages the results hold), hidden until
@@ -211,7 +213,11 @@ class SingleSessionDemixingVis:
         frame_batch_size: int = 300,
         panel_names: dict[str, str] | None = None,
         canvas=None,
+        contrast: str = "fastplotlib",
     ):
+        if contrast not in CONTRAST_METHODS:
+            raise ValueError(f"contrast is {contrast!r}; choose from {', '.join(CONTRAST_METHODS)}")
+        self._fit_contrast = CONTRAST_METHODS[contrast]
         self._canvas = canvas
         self._results_path = None if results_path is None else str(results_path)
         self._nmf_config_given = nmf_config is not None
@@ -475,8 +481,10 @@ class SingleSessionDemixingVis:
             self._panel_graphics = OrderedDict()
             for name, array in self._panels.items():
                 self._panel_graphics[name] = self._ndw_fov[name].add_nd_image(
-                    array, ["time", "m", "n"], ["m", "n"], slider_maps={"time": frame_timings}, name=name
+                    array, ["time", "m", "n"], ["m", "n"], slider_maps={"time": frame_timings}, compute_histogram=False,
+                    name=name,
                 )
+                self._fit_contrast(self._panel_graphics[name])
                 self._ndw_fov.figure[name].title = array.current
             self._fov_subplot = self._ndw_fov.figure[next(iter(self._panels))]
             self._ndw_fov.figure.set_imgui_right_click(SourceRightClickMenu(self._panel_choices, self._set_source))
@@ -493,6 +501,7 @@ class SingleSessionDemixingVis:
                 self._panels[name] = SwitchableArray(sources, self._shape)
                 self._panels[name].current = keep if same else order[min(i, len(order) - 1)]
                 self._panel_graphics[name].data = self._panels[name]
+                self._fit_contrast(self._panel_graphics[name])
                 if frames_changed:
                     self._panel_graphics[name].slider_maps = {"time": frame_timings}
                 self._ndw_fov.figure[name].title = self._panels[name].current
@@ -653,12 +662,13 @@ class SingleSessionDemixingVis:
         """Show movie ``name`` in ``panel``: it re-slices and refits its color limits; zoom and rois stay."""
         self._panels[panel].current = name
         self._ndw_fov.figure[panel].title = name
-        # re-slice now, not on the scheduled fetch, so the color limits refit to the new frame; then what the
-        # spatial_func setter does after a change of what the slicer sees
+        # re-slice now, not on the scheduled fetch, so the refit sees the new movie; the slicer cannot see the switch
+        # inside the SwitchableArray, so its histogram is of the old movie until recomputed
         graphic = self._panel_graphics[panel]
         run_sync(graphic._set_indices_())
-        graphic.slicer._recompute_histogram()
-        graphic._reset_histogram()
+        if graphic.compute_histogram:
+            graphic.slicer._recompute_histogram()
+        self._fit_contrast(graphic)
 
     def _bind_click_handlers(self):
         """Re-attach the click handlers to every video panel: NDGraphic.data= replaces the graphic instance."""
