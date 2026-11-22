@@ -1,8 +1,7 @@
-from .decomposition import compute_lowrank_factorized_svd, compression_routine
-from .compression_array import CompressionArray, CompressionResidualArray, TrendArray
-from .denoising import denoise_batched, CompressionTemporalDenoiser, train_total_variance_denoiser, save_denoiser, load_denoiser, pretrain_denoiser
-from .compression_strategies import CompressStrategy, CompressDenoiseStrategy
-from .preprocessing import SplineDetrend
+import lazy_loader
+
+# NOTE: names load on first use, so the viewer's CompressionArray does not import the denoiser's pytorch_lightning
+__getattr__, __dir__, _ = lazy_loader.attach_stub(__name__, __file__)
 
 __all__ = [
     "TrendArray",

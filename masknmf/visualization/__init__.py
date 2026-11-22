@@ -1,18 +1,7 @@
-from masknmf.visualization import imgui
-from masknmf.visualization.plots import (
-    construct_index,
-    plot_ith_roi,
-    plot_pmd_vs_raw_stack_diagnostic,
-    generate_raw_vs_resid_plot_folder,
-    roi_compare_pmd_raw,
-    pmd_temporal_denoiser_trace_plot
-)
+import lazy_loader
 
-from masknmf.visualization.motion_vis import MotionCorrectionVis
-from masknmf.visualization.demixing_vis import SingleSessionDemixingVis, visualize_superpixels_peaks
-from masknmf.visualization.multisession_vis import MultiSessionDemixingVis
-from masknmf.visualization.classification_vis import ClassificationVis
-from masknmf.visualization.compression_vis import CompressionVis
+# NOTE: names load on first use, so the demixing viewer does not import roicat, matplotlib and plotly
+__getattr__, __dir__, _ = lazy_loader.attach_stub(__name__, __file__)
 
 __all__ = [
     "CompressionVis",
