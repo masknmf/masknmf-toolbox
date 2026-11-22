@@ -33,7 +33,7 @@ import masknmf
 from masknmf import cli
 from masknmf.demixing._adapters import ADAPTERS, adapter_for, adapter_patterns
 from masknmf.demixing.curation import latest_results
-from masknmf.io import group_name_compression, group_name_demixing, group_names_registration, recorded_raw_movie, stage_groups
+from masknmf.io import SUFFIXES_HDF5, group_name_compression, group_name_demixing, group_names_registration, recorded_raw_movie, stage_groups
 from masknmf.pipelines import scraper
 from masknmf.pipelines._base import BasePipeline
 from masknmf.visualization.imgui import guide, param_hints
@@ -394,7 +394,7 @@ def apply_theme() -> None:
 
 def is_hdf5(filepath: str) -> bool:
     """Whether a path names an hdf5 file."""
-    return Path(filepath).suffix.lower() in cli.SUFFIXES_HDF5
+    return Path(filepath).suffix.lower() in SUFFIXES_HDF5
 
 
 @dataclasses.dataclass

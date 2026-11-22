@@ -57,25 +57,11 @@ from pathlib import Path
 import numpy as np
 
 import masknmf
-from masknmf.classification import RoicatClassifier
-from masknmf.demixing._adapters import adapter_for, adapter_raw_sources, adapter_sources
-from masknmf.demixing.curation import latest_results
-from masknmf.demixing.labels import SIDECAR_SUFFIX, read_labels
-from masknmf.io import (
-    SUFFIXES_HDF5,
-    SUFFIXES_TIFF,
-    config_record,
-    group_name_compression,
-    group_name_demixing,
-    group_names_registration,
-    OpenedResults,
-    has_group,
-    read_run_record,
-    stage_groups,
-)
-from masknmf.multisession import RoicatDataAdapter, RoicatTracker
 from masknmf.pipelines import scraper
-from masknmf.utils.display import handler as handler_console
+
+# NOTE: masknmf loads its names on first use, so `masknmf --help` imports none of torch, h5py or fastplotlib. Keep it
+# that way: reach masknmf through its namespace (masknmf.io.has_group), and import a module it does not expose inside
+# the function that needs it.
 
 
 GLOB_TRACKING_MANIFEST = "*_roicat-tracking-manifest.json"
@@ -105,13 +91,15 @@ def has_stage(filepath_results: str, name_group: str) -> bool:
 def groups_present(filepath_results: str) -> list[str]:
     """masknmf.io.stage_groups, a path that is not a results file ending the command."""
     try:
-        return stage_groups(filepath_results)
+        return masknmf.io.stage_groups(filepath_results)
     except (OSError, ValueError) as e:
         fail(str(e))
 
 
 def expand_sources(entries: list[str]) -> list[str]:
     """The results files, and the paths adapters expand entries to, that view entries name."""
+    from masknmf.demixing._adapters import adapter_for
+
     sources = []
     for entry in entries:
         adapter = adapter_for(entry)
@@ -126,6 +114,8 @@ def expand_sources(entries: list[str]) -> list[str]:
 
 def describe_source(filepath: str) -> list[str]:
     """A results file's stage groups, else its adapter's line about it."""
+    from masknmf.demixing._adapters import adapter_for
+
     adapter = adapter_for(filepath)
     return [adapter.describe(Path(filepath))] if adapter is not None else groups_present(filepath)
 
@@ -153,7 +143,7 @@ def expand_results(entries: list[str]) -> list[str]:
         stores += stores_entry
         if len(matches) == 0:
             fail(f"no results file matches {entry}")
-        kept = latest_results(matches)
+        kept = masknmf.demixing.latest_results(matches)
         if len(kept) < len(matches):
             print(f"{entry}: {len(matches) - len(kept)} file(s) left out, each replaced by a newer curated file")
         files.extend(kept)
@@ -172,6 +162,8 @@ def match_results(entry: str) -> tuple[list[str], list[str]]:
     Returns:
         tuple[list[str], list[str]]: The matching files, and the stores skipped
     """
+    from masknmf.demixing.labels import SIDECAR_SUFFIX
+
     parts = Path(entry).expanduser().parts
     stores = []
     index = next(i for i, part in enumerate(parts) if any(c in part for c in "*?["))
@@ -196,7 +188,7 @@ def match_results(entry: str) -> tuple[list[str], list[str]]:
     matches = [
         os.path.normpath(path)
         for path in candidates
-        if path.lower().endswith(SUFFIXES_HDF5) and not path.endswith(SIDECAR_SUFFIX)
+        if path.lower().endswith(masknmf.io.SUFFIXES_HDF5) and not path.endswith(SIDECAR_SUFFIX)
     ]
     return matches, stores
 
@@ -222,12 +214,13 @@ def find_tracking(entry: str) -> Optional[Path]:
 
 def demixing_sessions(files: list[str]) -> list[str]:
     """The results files holding top-level demixing results, each one a classification session; the rest are reported and skipped."""
-    sessions = [filepath for filepath in files if has_stage(filepath_results=filepath, name_group=group_name_demixing())]
+    name_demixing = masknmf.io.group_name_demixing()
+    sessions = [filepath for filepath in files if has_stage(filepath_results=filepath, name_group=name_demixing)]
     for filepath in files:
         if filepath not in sessions:
-            print(f"skipped {filepath}: it holds no {group_name_demixing()}")
+            print(f"skipped {filepath}: it holds no {name_demixing}")
     if len(sessions) == 0:
-        fail(f"no results file holds {group_name_demixing()}")
+        fail(f"no results file holds {name_demixing}")
     return sessions
 
 
@@ -289,7 +282,7 @@ def read_config_file(filepath: str) -> dict:
         loaded = json.loads(path.read_text())
     except json.JSONDecodeError as error:
         fail(f"{path.name} is not valid json: {error}")
-    record = config_record(loaded=loaded)
+    record = masknmf.io.config_record(loaded=loaded)
     if record is None:
         fail(f"{path.name} should hold a json object with argument names to values under \"configs\"")
     return record
@@ -589,7 +582,7 @@ def command_run(args: argparse.Namespace) -> None:
         for field, filepath in filepaths_input.items():
             path = Path(filepath).expanduser().resolve()
             if path.is_dir():
-                size = sum(p.stat().st_size for p in path.iterdir() if p.suffix.lower() in SUFFIXES_TIFF)
+                size = sum(p.stat().st_size for p in path.iterdir() if p.suffix.lower() in masknmf.io.SUFFIXES_TIFF)
             else:
                 size = path.stat().st_size
             inputs[field] = {"path": str(path), "name": path.name, "bytes": size,
@@ -655,7 +648,7 @@ def command_run(args: argparse.Namespace) -> None:
             if folder is not None and not any(
                 has_stage(filepath_results=str(filepath), name_group=name)
                 for filepath in folder.glob("*.hdf5")
-                for name in (*group_names_registration(), group_name_compression())
+                for name in (*masknmf.io.group_names_registration(), masknmf.io.group_name_compression())
             ):
                 logger.removeHandler(pipeline.log_handler)
                 pipeline.log_handler.close()
@@ -724,8 +717,8 @@ def view_tracking(args: argparse.Namespace, source: Path) -> None:
     for filepath in files:
         if not Path(filepath).is_file():
             fail(f"no such file: {filepath}")
-        if not has_group(filepath, group_name_demixing()):
-            fail(f"{filepath} holds no {group_name_demixing()}")
+        if not masknmf.io.has_group(filepath, masknmf.io.group_name_demixing()):
+            fail(f"{filepath} holds no {masknmf.io.group_name_demixing()}")
     # richfile and roicat warn about their own metadata on every load, nothing the user can act on
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -827,6 +820,9 @@ def command_view(args: argparse.Namespace) -> None:
     Open the viewers for whatever stages the results files hold; --classify opens only the classification viewer.
     A folder opens its newest tracking manifest in the multisession viewer, else its results files.
     """
+    from masknmf.demixing._adapters import adapter_for
+    from masknmf.utils.display import handler as handler_console
+
     # a viewer's notes need no timestamps
     handler_console.setFormatter(logging.Formatter("%(message)s"))
     tracking = find_tracking(entry=args.results[0])
@@ -889,13 +885,16 @@ def open_demixing_viewer(
     Returns:
         masknmf.SingleSessionDemixingVis: The viewer
     """
+    from masknmf.demixing._adapters import adapter_for
+
     if len(names_present) == 0:
         fail(f"{filepath_results} holds no masknmf results")
 
     adapter = adapter_for(filepath_results)
     if args.prefix and adapter is not None:
         fail(f"{filepath_results} holds {adapter.pipeline} results, which take no prefix")
-    name_demixing = f"{args.prefix}/{group_name_demixing()}" if args.prefix else group_name_demixing()
+    name_demixing = masknmf.io.group_name_demixing()
+    name_demixing = f"{args.prefix}/{name_demixing}" if args.prefix else name_demixing
     if name_demixing not in names_present and args.prefix:
         fail(f"{filepath_results} holds no {name_demixing}")
 
@@ -905,7 +904,7 @@ def open_demixing_viewer(
     raw = None if args.raw is None else load_movie(filepath_movie=args.raw, name_dataset=args.dataset)
     # the demixing results, else the compression, else the registration applied to the raw movie
     try:
-        opened = OpenedResults.open(filepath_results, raw=raw, prefix=args.prefix, device=device)
+        opened = masknmf.io.OpenedResults.open(filepath_results, raw=raw, prefix=args.prefix, device=device)
     except (OSError, ValueError) as e:
         fail(f"{e}; --raw names the movie")
     for note in opened.skipped:
@@ -985,6 +984,7 @@ def command_serve(args: argparse.Namespace) -> None:
 
     from masknmf.visualization.canvas_server import SESSION_KEY_ENV, BrowserCanvas, CanvasServer
     from masknmf.visualization.imgui.options import OPTIONS
+    from masknmf.utils.display import handler as handler_console
 
     handler_console.setFormatter(logging.Formatter("%(message)s"))
     # a second figure would open on this machine, where no one sees it
@@ -1034,6 +1034,9 @@ def command_serve(args: argparse.Namespace) -> None:
 
 def command_train_classifier(args: argparse.Namespace) -> None:
     """Train a ROICaT classifier on the labels the classification viewer saved beside each results file."""
+    from masknmf.classification import RoicatClassifier
+    from masknmf.demixing.labels import read_labels
+
     sessions = demixing_sessions(files=expand_results(entries=args.results))
     unlabeled = []
     for filepath in sessions:
@@ -1057,7 +1060,7 @@ def command_train_denoiser(args: argparse.Namespace) -> None:
     """Train one temporal denoiser on the compressions in several results files and save its weights."""
     files = expand_results(entries=args.results)
     for filepath in files:
-        record = read_run_record(filepath)
+        record = masknmf.io.read_run_record(filepath)
         config = None if record is None else record["configs"].get("compress_config")
         if isinstance(config, dict) and config.get("kind") == "compress-denoise":
             fail(f"{filepath} was compressed with a denoiser; a denoiser trains on compressions made without one, "
@@ -1081,6 +1084,8 @@ def command_mask(args: argparse.Namespace) -> None:
 
 def command_classify(args: argparse.Namespace) -> None:
     """Classify every ROI in each results file; predictions go to its labels sidecar, the labels are left as they are."""
+    from masknmf.classification import RoicatClassifier
+
     sessions = demixing_sessions(files=expand_results(entries=args.results))
     if not Path(args.classifier).is_file():
         fail(f"no such classifier: {args.classifier}")
@@ -1098,12 +1103,12 @@ def command_track(args: argparse.Namespace) -> None:
         fail(f"tracking needs at least two sessions, got {len(sessions)}")
     for session, filepath in enumerate(sessions):
         print(f"  {session}  {filepath}")
-    tracker = RoicatTracker()
+    tracker = masknmf.multisession.RoicatTracker()
     tracker.params["general"]["use_GPU"] = args.device != "cpu"
     # richfile and roicat warn about their own metadata, nothing the user can act on; roicat's progress still prints
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        tracking = tracker.run_tracking(RoicatDataAdapter.from_masknmf(sessions, um_per_pixel=args.um_per_pixel))
+        tracking = tracker.run_tracking(masknmf.multisession.RoicatDataAdapter.from_masknmf(sessions, um_per_pixel=args.um_per_pixel))
         folder = tracking.to_roicat_dir(args.out)
     print_tracking(tracking=tracking, folder=str(folder))
 
@@ -1115,16 +1120,25 @@ def timings(num_frames: int, frame_rate: Optional[float]):
     return np.arange(num_frames) / float(frame_rate)
 
 
-def build_parser(spec: Optional[scraper.PipelineSpec]) -> argparse.ArgumentParser:
+def build_parser(spec: Optional[scraper.PipelineSpec], command: Optional[str] = None) -> argparse.ArgumentParser:
     """
     Build the full parser, adding pipeline specific flags when a pipeline was named.
 
     Args:
         spec (PipelineSpec | None): The scraped pipeline, or None when --pipeline was
             not given
+        command (str | None): The first argument; view and serve list the adapters in their help only when it names them
     Returns:
         argparse.ArgumentParser: The parser
     """
+    # NOTE: listing the adapters imports them and torch, so only view and serve, whose help shows the list, pay for it
+    if command in ("view", "serve"):
+        from masknmf.demixing._adapters import adapter_raw_sources, adapter_sources
+
+        help_adapters = f"Other pipelines' results open through their adapters: {adapter_sources()}"
+        help_raw = f"the raw movie the results came from; {adapter_raw_sources()}"
+    else:
+        help_adapters, help_raw = "", "the raw movie the results came from"
     parser = argparse.ArgumentParser(
         prog="masknmf",
         description="Motion correct, compress and demix functional imaging data.",
@@ -1148,7 +1162,7 @@ def build_parser(spec: Optional[scraper.PipelineSpec]) -> argparse.ArgumentParse
     parser_run.add_argument(
         "--pipeline",
         required=True,
-        choices=sorted(scraper.pipeline_registry()),
+        choices=scraper.pipeline_slugs(),
         help="which pipeline to run; decides the rest of the flags",
     )
     parser_run.add_argument(
@@ -1163,9 +1177,9 @@ def build_parser(spec: Optional[scraper.PipelineSpec]) -> argparse.ArgumentParse
         "results", nargs="+", help="results .hdf5 files or globs, e.g. \"sessions/*/results.hdf5\"; several open one viewer each, or one classification viewer with --classify. "
         "Or a tracking folder (its newest run) or one run's *-manifest.json; a tracking folder without a manifest is followed by its results files in session order. "
         "Any other folder means the *results*.hdf5 files in it, each replaced by its newest curated file. "
-        f"Other pipelines' results open through their adapters: {adapter_sources()}",
+        + help_adapters,
     )
-    parser_view.add_argument("--raw", default=None, help=f"the raw movie the results came from; {adapter_raw_sources()}")
+    parser_view.add_argument("--raw", default=None, help=help_raw)
     parser_view.add_argument("--dataset", default=None)
     parser_view.add_argument("--fs", default=None, type=float, help="acquisition rate in Hz")
     parser_view.add_argument(
@@ -1197,7 +1211,7 @@ def build_parser(spec: Optional[scraper.PipelineSpec]) -> argparse.ArgumentParse
 
     parser_serve = subparsers.add_parser("serve", help="serve the demixing viewer to a browser")
     parser_serve.add_argument("results", nargs="?", default=None, help="a results .hdf5 file, or a folder: its results files are listed in the browser to pick from; none serves the launcher")
-    parser_serve.add_argument("--raw", default=None, help=f"the raw movie the results came from; {adapter_raw_sources()}")
+    parser_serve.add_argument("--raw", default=None, help=help_raw)
     parser_serve.add_argument("--dataset", default=None)
     parser_serve.add_argument("--fs", default=None, type=float, help="acquisition rate in Hz")
     parser_serve.add_argument("--prefix", default="", help="group the demixing results sit under, as for view")
@@ -1276,8 +1290,6 @@ def main(argv: Optional[list[str]] = None) -> None:
         if argv is None:
             return
         print(f"masknmf {format_command(argv=argv)}")
-    else:
-        print("\r\033[K", end="", file=sys.stderr, flush=True)
 
     bootstrap, _ = build_bootstrap_parser().parse_known_args(argv)
     if argv[:1] == ["run"] and bootstrap.pipeline is None and bootstrap.config is not None:
@@ -1285,15 +1297,15 @@ def main(argv: Optional[list[str]] = None) -> None:
         if name_class is None:
             fail("the config file names no pipeline; pass --pipeline")
         bootstrap.pipeline = scraper.slugify(name_class=name_class)
-        if bootstrap.pipeline not in scraper.pipeline_registry():
+        if bootstrap.pipeline not in scraper.pipeline_slugs():
             fail(f"the config file names {name_class!r}, which is not a masknmf pipeline")
         argv = ["run", "--pipeline", bootstrap.pipeline, *argv[1:]]
 
     spec = None
-    if bootstrap.pipeline is not None and bootstrap.pipeline in scraper.pipeline_registry():
+    if bootstrap.pipeline is not None and bootstrap.pipeline in scraper.pipeline_slugs():
         spec = spec_for(slug=bootstrap.pipeline)
 
-    args = build_parser(spec=spec).parse_args(argv)
+    args = build_parser(spec=spec, command=argv[0]).parse_args(argv)
     args.command = f"masknmf {format_command(argv=argv)}"
     args.argv = argv
     args.handler(args)

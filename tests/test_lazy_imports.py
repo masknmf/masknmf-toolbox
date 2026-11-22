@@ -140,3 +140,24 @@ def test_importing_masknmf_loads_no_heavy_dependency():
         "print([name for name in heavy if name in sys.modules])"
     )
     assert out.strip() == "[]"
+
+
+def test_masknmf_help_imports_no_heavy_dependency():
+    out = run_python(
+        "import contextlib, io, sys\n"
+        "from masknmf import cli\n"
+        "with contextlib.suppress(SystemExit), contextlib.redirect_stdout(io.StringIO()):\n"
+        "    cli.main(['--help'])\n"
+        "print([name for name in ['torch', 'h5py', 'fastplotlib', 'pytorch_lightning', 'roicat'] if name in sys.modules])"
+    )
+    assert out.strip() == "[]"
+
+
+@pytest.mark.parametrize("name_module", ["masknmf.io", "masknmf.visualization.demixing_vis", "masknmf.demixing._adapters"])
+def test_opening_results_imports_no_training_or_tracking_stack(name_module):
+    out = run_python(
+        "import sys\n"
+        f"import {name_module}\n"
+        "print([name for name in ['pytorch_lightning', 'roicat', 'cvxpy', 'plotly'] if name in sys.modules])"
+    )
+    assert out.strip() == "[]"
