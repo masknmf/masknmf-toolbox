@@ -178,6 +178,18 @@ def kind_of(value: Any) -> str:
     return config_kind(cls_config=type(value))
 
 
+def pipeline_slugs() -> list[str]:
+    """
+    Every pipeline masknmf exports, by its command line name, without importing any of them.
+
+    Returns:
+        list[str]: The slugs, sorted
+    """
+    from masknmf import pipelines
+
+    return sorted(slugify(name_class=name) for name in pipelines.__all__)
+
+
 def pipeline_registry() -> dict[str, type]:
     """
     Every pipeline masknmf exports, keyed by its command line name.
