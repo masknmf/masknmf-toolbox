@@ -2,8 +2,6 @@ import logging
 import numpy as np
 import scipy.sparse
 
-import matplotlib.pyplot as plt
-from mpl_toolkits.axes_grid1 import make_axes_locatable
 import torch
 import networkx as nx
 from collections import defaultdict
@@ -260,6 +258,9 @@ def torch_dense_to_sparse_coo(dense_tensor: torch.Tensor) -> SparseCOOTensor:
 
 def show_img(ax, img):
     # Visualize local correlation, adapt from kelly's code
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+
     im = ax.imshow(img, cmap="jet")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes("right", size="5%", pad=0.1)
@@ -267,6 +268,8 @@ def show_img(ax, img):
 
 
 def spatial_sum_plot(a, a_fin, patch_size, order="C", num_list_fin=None, text=False):
+    import matplotlib.pyplot as plt
+
     scale = np.maximum(1, (patch_size[1] / patch_size[0]))
     fig = plt.figure(figsize=(16 * scale, 8))
     ax = plt.subplot(1, 2, 1)

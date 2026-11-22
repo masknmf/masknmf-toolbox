@@ -3,16 +3,13 @@ import torch
 import numpy as np
 import logging
 import math
-import matplotlib.pyplot as plt
-from matplotlib.figure import Figure
 import scipy.ndimage
 import scipy.signal
 import scipy.sparse
 import scipy
 import networkx as nx
 from masknmf.utils.display import progress
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-from typing import Literal
+from typing import Literal, TYPE_CHECKING
 from collections.abc import Sequence
 from masknmf.utils import SparseCOOTensor, SparseCSRTensor
 from masknmf.compression.preprocessing import SplineDetrenderBase
@@ -45,6 +42,9 @@ from masknmf.demixing.background_estimation import RingModel
 from masknmf.compression import CompressionArray
 from masknmf.compression.preprocessing import SplineDetrend
 from masknmf import display
+
+if TYPE_CHECKING:
+    from matplotlib.figure import Figure
 
 
 logger = logging.getLogger(__name__)
@@ -1510,7 +1510,7 @@ def pure_superpixel_corr_compare_plot(
         mad_correlation_img: np.ndarray,
         text: bool = False,
         order: str = "C",
-) -> tuple[Figure, np.ndarray]:
+) -> tuple["Figure", np.ndarray]:
     """
     General plotting diagnostic for superpixels
     Args:
@@ -1519,6 +1519,7 @@ def pure_superpixel_corr_compare_plot(
         pure_pix (np.ndarray): The (N,) shaped array describing the values of the pure superpixels
 
     """
+    import matplotlib.pyplot as plt
 
     scale = np.maximum(1, (connect_mat_1.shape[1] / connect_mat_1.shape[0]))
     fig = plt.figure(figsize=(4 * scale, 12))
@@ -1598,6 +1599,9 @@ def pure_superpixel_corr_compare_plot(
 
 def show_img(ax, img, vmin=None, vmax=None):
     # Visualize local correlation, adapt from kelly's code
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+
     im = ax.imshow(img, cmap="jet")
     divider = make_axes_locatable(ax)
     cax = divider.append_axes("right", size="5%", pad=0.1)
@@ -2117,6 +2121,8 @@ def spatial_comp_plot(
         standard_correlation_image: np.ndarray,
         ini: bool = False,
 ):
+    import matplotlib.pyplot as plt
+
     max_neurons = 5
     num = min(max_neurons, a.shape[1])
     patch_size = standard_correlation_image.shape[1:]
