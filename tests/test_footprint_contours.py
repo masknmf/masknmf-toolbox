@@ -1,4 +1,7 @@
-"""A contour runs smoothly around the pixels its mask fills, in the mask's color, and footprints that overlap each keep theirs."""
+"""
+A contour runs smoothly around the pixels its mask fills, in the mask's color, and footprints that overlap each keep
+theirs. Footprints marked to merge draw as one mask and one contour.
+"""
 
 import fastplotlib as fpl
 import numpy as np
@@ -6,7 +9,7 @@ import pytest
 import scipy.ndimage
 from rendercanvas.offscreen import RenderCanvas
 
-from masknmf.visualization.rois import MARKED_COLOR, MASK_CUTOFF, FootprintContours, FootprintSet, outline, support
+from masknmf.visualization.rois import MARKED_COLOR, MASK_CUTOFF, FootprintContours, FootprintSet, outline, support, union
 
 SHAPE = (16, 16)
 COLORS = RED, BLUE, WHITE = (1.0, 0.0, 0.0), (0.0, 0.0, 1.0), (1.0, 1.0, 1.0)
@@ -155,6 +158,92 @@ def test_marked_and_grouped_footprints_take_those_colors():
     colors = footprints.mask_colors(marked=[1, 2], grouped={0: BLUE, 1: BLUE})
     np.testing.assert_allclose(colors, [BLUE, MARKED_COLOR, MARKED_COLOR])
     assert FootprintSet([]).mask_colors().shape == (0, 3)
+
+
+def halves() -> tuple:
+    """Boolean masks of two 8 x 4 blocks a column apart, and of a block away from both."""
+    left, right, apart = np.zeros((3, *SHAPE), bool)
+    left[3:11, 2:6] = True
+    right[3:11, 7:11] = True
+    apart[13:15, 12:15] = True
+    return left, right, apart
+
+
+def test_union_scales_every_footprint_to_the_first_peak_and_takes_the_larger_weight():
+    left, right, _apart = halves()
+    right[:, 5] = left[:, 5]  # the two share a column
+    bright, dim = np.zeros((2, *SHAPE), np.float32)
+    bright[left] = np.linspace(1.0, 4.0, left.sum())
+    dim[right] = 0.5 * MASK_CUTOFF
+    dim[:, 5] /= 2  # at half its peak in the shared column: over the bright one in the top rows, under it in the others
+    footprints = [(*np.nonzero(weights), weights[weights > 0]) for weights in (bright, dim)]
+
+    ypix, xpix, lam = union(footprints)
+
+    merged = np.zeros(SHAPE, np.float32)
+    merged[ypix, xpix] = lam
+    np.testing.assert_allclose(merged, np.maximum(bright, dim * (4.0 / dim.max())))
+    assert (merged[:, 5] > bright[:, 5]).any() and (merged[:, 5] == bright[:, 5])[left[:, 5]].any()
+    empty = footprint(np.zeros(SHAPE, bool))
+    assert union([empty, empty])[2].size == 0
+    np.testing.assert_array_equal(union([empty, footprints[0]])[2], footprints[0][2])
+
+
+def test_merged_footprints_draw_as_one_mask_and_one_contour_until_unmerged():
+    left, right, apart = halves()
+    footprints = FootprintSet(
+        [footprint(left, weight=3.0), footprint(apart), footprint(right, weight=0.2)],
+        colors=np.array([RED, WHITE, BLUE]),
+        peaks=np.array([0.5, 3.0, 1.0]),
+    )
+    outlines = list(footprints.outlines)
+    apart_only = footprints.rgba(SHAPE, opacity=1.0, by_peak=False)
+    alpha_left = footprints.rgba(SHAPE, opacity=1.0, by_peak=True)[left, 3]
+
+    footprints.merge([[2, 0]])
+
+    assert footprints.merges == [[0, 2]]
+    merged = footprints.rgba(SHAPE, opacity=1.0, by_peak=False)
+    both = np.zeros(SHAPE, bool)
+    both[3:11, 2:11] = True  # the column between the halves is filled
+    np.testing.assert_array_equal(merged[..., 3] > 0, both | apart)
+    np.testing.assert_array_equal(merged[both][:, :3], np.broadcast_to((255, 0, 0), (both.sum(), 3)))
+    assert len(loops_of(footprints.outlines[0])) == 1 and len(footprints.outlines[2]) == 0
+    np.testing.assert_array_equal(footprints.outlines[0], outline(*np.nonzero(both)))
+    assert footprints.outlines[1] is outlines[1]
+    # with the signal peak weighting, the union is as bright as its lowest footprint was
+    assert 0 < alpha_left.max() < 255
+    np.testing.assert_array_equal(footprints.rgba(SHAPE, opacity=1.0, by_peak=True)[both, 3], alpha_left.max())
+    np.testing.assert_array_equal(footprints.areas, [left.sum(), apart.sum(), right.sum()])
+
+    footprints.merge([])
+
+    np.testing.assert_array_equal(footprints.rgba(SHAPE, opacity=1.0, by_peak=False), apart_only)
+    for redrawn, original in zip(footprints.outlines, outlines):
+        np.testing.assert_array_equal(redrawn, original)
+
+
+def test_a_footprint_that_leaves_a_merge_group_draws_as_itself_again():
+    left, right, apart = halves()
+    footprints = FootprintSet([footprint(left), footprint(right), footprint(apart)])
+    own = [set(zip(*support[:2])) for support in footprints.supports]
+
+    footprints.merge([[0, 1]])
+    footprints.merge([[1, 2]])
+
+    drawn = [set(zip(*support[:2])) for support in footprints.supports]
+    assert drawn == [own[0], own[1] | own[2], set()]
+    for k, (ypix, xpix, _lam) in enumerate(footprints.supports):
+        np.testing.assert_array_equal(footprints.outlines[k], outline(ypix, xpix))
+
+
+@pytest.mark.parametrize("groups", [[[0]], [[0, 0]], [[0, 1], [1, 2]]], ids=["one footprint", "one footprint twice", "a footprint in two groups"])
+def test_merge_groups_hold_two_or_more_footprints_and_share_none(groups):
+    left, right, apart = halves()
+    footprints = FootprintSet([footprint(left), footprint(right), footprint(apart)])
+    with pytest.raises(ValueError, match="merge group"):
+        footprints.merge(groups)
+    assert footprints.merges == []
 
 
 def test_overlapping_footprints_each_keep_a_contour_and_the_highlighted_ones_are_on_top(panel):

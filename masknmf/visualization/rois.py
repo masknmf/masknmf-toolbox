@@ -2,7 +2,7 @@
 
 import colorsys
 import functools
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable, Mapping, Optional, Tuple
 
 import matplotlib
@@ -21,6 +21,7 @@ __all__ = [
     "outline",
     "roi_color",
     "support",
+    "union",
 ]
 
 # opacity a selected mask is filled at, whatever the overlay opacity
@@ -35,6 +36,7 @@ CONTOUR_THICKNESS = (1.0, 2.0)
 # z of the contour lines: over the mask overlay at 0.5, the highlighted over the others
 CONTOUR_Z = (0.6, 0.7)
 TRANSPARENT = (0.0, 0.0, 0.0, 0.0)
+NO_PIXELS = (np.empty(0, np.int64), np.empty(0, np.int64), np.empty(0, np.float32))  # a footprint that draws nothing
 
 
 def _make_roi_colors() -> np.ndarray:
@@ -90,6 +92,29 @@ def support(ypix: np.ndarray, xpix: np.ndarray, lam: np.ndarray) -> Tuple[np.nda
     weights[ypix - y0, xpix - x0] = lam
     filled = scipy.ndimage.grey_closing(weights, size=(3, 3), mode="constant")
     weights = np.where(weights > 0, weights, filled)
+    ypix, xpix = np.nonzero(weights)
+    return ypix + y0, xpix + x0, weights[ypix, xpix]
+
+
+def union(footprints) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Several footprints as one: every footprint is scaled to the peak of the first, and a pixel takes the largest of
+    their weights there. At one peak, a dim footprint's pixels stay over MASK_CUTOFF of the union's.
+
+    Args:
+        footprints: iterable of (ypix, xpix, lam)
+
+    Returns:
+        (ypix, xpix, lam) of the pixels any of the footprints has
+    """
+    footprints = [footprint for footprint in footprints if footprint[2].size]
+    if not footprints:
+        return NO_PIXELS
+    peak = footprints[0][2].max()
+    ypix, xpix, lam = map(np.concatenate, zip(*((ypix, xpix, lam * (peak / lam.max())) for ypix, xpix, lam in footprints)))
+    y0, x0 = ypix.min(), xpix.min()
+    weights = np.zeros((ypix.max() - y0 + 1, xpix.max() - x0 + 1), np.float32)
+    np.maximum.at(weights, (ypix - y0, xpix - x0), lam)
     ypix, xpix = np.nonzero(weights)
     return ypix + y0, xpix + x0, weights[ypix, xpix]
 
@@ -178,11 +203,13 @@ class FootprintSet:
     """
     Footprints an algorithm produced, as (ypix, xpix, lam) per component; ``colors`` overrides the id palette and
     ``peaks`` (one per footprint, its trace's maximum) scales the overlay so a weak signal draws faint.
+    ``merges`` are the groups of footprints that ``merge`` draws as one.
     """
 
     footprints: list
     colors: Optional[np.ndarray] = None
     peaks: Optional[np.ndarray] = None
+    merges: list = field(default_factory=list, init=False)
 
     @classmethod
     def from_sparse(cls, a: torch.Tensor, shape: Tuple[int, int]) -> "FootprintSet":
@@ -234,13 +261,40 @@ class FootprintSet:
 
     @functools.cached_property
     def supports(self) -> list:
-        """The ``support`` of every footprint, in footprint order. Computed once, from the footprints as they are then."""
+        """The pixels every footprint draws, in footprint order: its ``support``, until ``merge`` draws it in a group."""
         return [support(*footprint) for footprint in self.footprints]
 
     @functools.cached_property
     def outlines(self) -> list:
-        """The ``outline`` of every footprint's support, in footprint order. Computed once, like the supports."""
+        """The ``outline`` of the pixels every footprint draws, in footprint order. Computed once, like the supports."""
         return [outline(ypix, xpix) for ypix, xpix, _lam in self.supports]
+
+    def _draw(self, index: int, footprint):
+        """Footprint ``index`` draws the support of ``footprint`` and its outline."""
+        self.supports[index] = support(*footprint)
+        self.outlines[index] = outline(*self.supports[index][:2])
+
+    def merge(self, groups):
+        """
+        Draw each of ``groups`` as one footprint: the mask and the contour of the group's ``union``, in place of its
+        lowest footprint and in that footprint's color. The group's other footprints draw nothing. The groups replace
+        those of the call before, and ``footprints`` stay as they are.
+
+        Args:
+            groups: groups of footprint indices, two or more in each and none in two groups
+        """
+        groups = [sorted(int(k) for k in group) for group in groups]
+        members = [k for group in groups for k in group]
+        if any(len(group) < 2 for group in groups) or len(set(members)) != len(members):
+            raise ValueError(f"a merge group holds two or more footprints, and no footprint is in two groups: {groups}")
+        # only the groups that changed are drawn again: first every footprint of a group that is gone, as itself
+        for k in (k for group in self.merges if group not in groups for k in group):
+            self._draw(k, self.footprints[k])
+        for lowest, *others in (group for group in groups if group not in self.merges):
+            self._draw(lowest, union(self.footprints[k] for k in (lowest, *others)))
+            for k in others:
+                self._draw(k, NO_PIXELS)
+        self.merges = groups
 
     def at(self, row: int, col: int) -> Optional[int]:
         """The lowest footprint that draws pixel (row, col), or None."""
