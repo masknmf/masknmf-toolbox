@@ -518,11 +518,10 @@ class SingleSessionDemixingVis:
         if self._has_ac:
             blank = np.zeros((*self._shape[1:3], 4), np.uint8)
             for name in self._panels:
-                overlay = self._ndw_fov.figure[name].add_image(
-                    blank, name="masks", alpha_mode="blend", offset=(0, 0, 0.5)
-                )
                 # literal RGBA bytes: auto-ranging the all-zero start saturates to white
-                overlay.vmin, overlay.vmax = 0, 255
+                overlay = self._ndw_fov.figure[name].add_image(
+                    blank, name="masks", vmin=0, vmax=255, alpha_mode="blend", offset=(0, 0, 0.5)
+                )
                 for tile in overlay.world_object.children:
                     tile.material.pick_write = False
                 self._mask_overlays[name] = overlay
