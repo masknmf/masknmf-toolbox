@@ -753,13 +753,17 @@ def view_tracking(args: argparse.Namespace, source: Path) -> None:
     fpl.loop.run()
 
 
-def launch_viewer(argv: list[str], filepath_log: Path) -> subprocess.Popen:
+def launch_viewer(
+    argv: list[str], filepath_log: Path, env_extra: Optional[dict] = None, detach: bool = True
+) -> subprocess.Popen:
     """
-    Run ``masknmf <argv>`` in a process of its own, detached from this terminal, its output going to a log.
+    Run ``masknmf <argv>`` in a process of its own, its output going to a log.
 
     Args:
         argv (list[str]): The arguments, without the program name
         filepath_log (Path): Where the process writes its output
+        env_extra (Optional[dict]): Variables set for the process on top of this one's
+        detach (bool): Run it in a session of its own, so closing this terminal or ctrl+c here leaves it running
     Returns:
         subprocess.Popen: The process
     """
@@ -769,26 +773,24 @@ def launch_viewer(argv: list[str], filepath_log: Path) -> subprocess.Popen:
         pythonw = python[: -len("python.exe")] + "pythonw.exe"
         if Path(pythonw).exists():
             python = pythonw
-    # its own session or process group, so closing this terminal or ctrl+c here leaves the window open
-    detach = (
-        {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if sys.platform == "win32" else {"start_new_session": True}
-    )
+    kwargs_detach = {}
+    if detach:
+        kwargs_detach = (
+            {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if sys.platform == "win32" else {"start_new_session": True}
+        )
     # unbuffered, so an error lands in the log after the output before it
     # the checkout this process imported first on the path, so the child does not pick up another installed masknmf
     dir_package = str(Path(masknmf.__file__).resolve().parents[1])
     pythonpath = os.pathsep.join(filter(None, [dir_package, os.environ.get("PYTHONPATH", "")]))
-    env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONPATH": pythonpath}
+    env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONPATH": pythonpath, **(env_extra or {})}
     with filepath_log.open("a", encoding="utf-8") as out:
         return subprocess.Popen(
-            [python, "-m", "masknmf.cli", *argv], stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, env=env, **detach
+            [python, "-m", "masknmf.cli", *argv], stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, env=env, **kwargs_detach
         )
 
 
-def view_each(args: argparse.Namespace, files: list[str]) -> None:
-    """
-    Open one demixing viewer per results file, each in its own process, so the windows never share a GPU context and
-    one crashing leaves the rest open. Waits for them and reports any that fail; ctrl+c stops waiting, not the windows.
-    """
+def viewer_options(args: argparse.Namespace) -> list[str]:
+    """The ``view`` or ``serve`` options a viewer process for one of several results files takes from this command's."""
     options = ["--device", args.device, "--contrast", args.contrast]
     if args.raw_correlation:
         options.append("--raw-correlation")
@@ -796,6 +798,15 @@ def view_each(args: argparse.Namespace, files: list[str]) -> None:
         options += ["--fs", str(args.fs)]
     if args.prefix:
         options += ["--prefix", args.prefix]
+    return options
+
+
+def view_each(args: argparse.Namespace, files: list[str]) -> None:
+    """
+    Open one demixing viewer per results file, each in its own process, so the windows never share a GPU context and
+    one crashing leaves the rest open. Waits for them and reports any that fail; ctrl+c stops waiting, not the windows.
+    """
+    options = viewer_options(args=args)
     folder_logs = Path(tempfile.gettempdir()) / "masknmf-view"
     folder_logs.mkdir(exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
