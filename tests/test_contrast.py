@@ -7,7 +7,7 @@ import pytest
 from fastplotlib.widgets.nd_widget._async import run_sync
 from rendercanvas.offscreen import RenderCanvas
 
-from masknmf.visualization.contrast import CONTRAST_METHODS, VMAX_FIXED, VMIN_FIXED
+from masknmf.visualization.contrast import CONTRAST_BY_MOVIE, CONTRAST_METHODS, VMAX_FIXED, VMIN_FIXED, histogram_on_show
 
 NUM_FRAMES = 20
 
@@ -18,9 +18,9 @@ def make_movie(offset: float = 0.0) -> np.ndarray:
     return frames + np.random.default_rng(0).random((NUM_FRAMES, 32, 32), dtype=np.float32)
 
 
-def make_panel():
+def make_panel(movie: np.ndarray | None = None):
     """An offscreen panel made as the viewer makes them: no histogram, limits fixed through graphic_kwargs."""
-    movie = make_movie()
+    movie = make_movie() if movie is None else movie
     widget = fpl.NDWidget({"time": (0, NUM_FRAMES, 1)}, names=["panel"], canvas=RenderCanvas(size=(400, 400), pixel_ratio=1))
     graphic = widget["panel"].add_nd_image(
         movie, ["time", "m", "n"], ["m", "n"], slider_maps={"time": np.arange(NUM_FRAMES)}, compute_histogram=False,
@@ -69,3 +69,23 @@ def test_first_frame_fits_the_first_frame_whatever_frame_is_on_show():
     CONTRAST_METHODS["first-frame"](graphic)
     assert (graphic.graphic.vmin, graphic.graphic.vmax) == pytest.approx((movie[0].min(), movie[0].max()))
     assert graphic.histogram_widget is None
+
+
+def test_the_background_fits_frames_across_the_movie_and_ignores_one_atypical_frame_on_show(monkeypatch):
+    monkeypatch.setattr(fastplotlib.graphics.image, "quick_min_max", refuse_to_compute)
+    movie = make_movie()
+    movie[0] += 1000
+    widget, graphic, _ = make_panel(movie=movie)
+    show_frame(widget=widget, graphic=graphic, index=0)
+    CONTRAST_BY_MOVIE["background"](graphic)
+    # frames t span [t, t + 1); the median frame of the 16 sampled is between frames 10 and 11
+    assert 10 < graphic.graphic.vmin < graphic.graphic.vmax < 12
+    assert graphic.histogram_widget is None
+
+
+def test_the_histogram_of_the_frame_on_show_spans_the_frame_and_the_limits():
+    widget, graphic, movie = make_panel()
+    show_frame(widget=widget, graphic=graphic, index=10)
+    counts, edges = histogram_on_show(graphic.graphic)
+    assert counts.sum() == movie[10].size
+    assert (edges[0], edges[-1]) == pytest.approx((VMIN_FIXED, movie[10].max()))

@@ -8,7 +8,7 @@ from masknmf.utils.display import progress
 import masknmf.arrays
 from masknmf.arrays.array_interfaces import ArrayLike
 from masknmf.utils import display
-from masknmf.visualization.imgui import TracePlot, resolve_time_reference
+from masknmf.visualization.imgui import TracePlot, frame_slider_map, resolve_time_reference
 from masknmf.visualization.imgui.scale import scale_figure
 from masknmf.motion_correction import BaseRegistrationArray
 
@@ -86,7 +86,7 @@ class MotionCorrectionVis:
 
         movie_dims = ["time", "m", "n"]
         movie_display_dims = ["m", "n"]
-        movie_index_mapping = {"time": frame_timings}
+        movie_index_mapping = {"time": frame_slider_map(frame_timings)}
         self._ndw[names[0]].add_nd_image(
             self.raw_stack,
             movie_dims,

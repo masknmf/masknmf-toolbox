@@ -3,7 +3,7 @@ from typing import *
 import numpy as np
 from masknmf.compression import CompressionArray, CompressionResidualArray
 from masknmf.utils import display
-from masknmf.visualization.imgui import TracePlot, resolve_time_reference, is_notebook_canvas
+from masknmf.visualization.imgui import TracePlot, frame_slider_map, resolve_time_reference, is_notebook_canvas
 from masknmf.diagnostics import pmd_autocovariance_diagnostics
 import fastplotlib as fpl
 from collections import OrderedDict
@@ -67,7 +67,7 @@ class CompressionVis:
         ref_range, frame_timings = resolve_time_reference(
             self.moco_stack.shape[0], frame_timings, ref_range
         )
-        movie_index_mapping = {"time": frame_timings}
+        movie_index_mapping = {"time": frame_slider_map(frame_timings)}
 
         # the mean is subtracted on each stack's own side: a registration array yields torch frames, which keep
         # the tensor (on device, no host copy)

@@ -1,3 +1,6 @@
+from functools import partial
+from typing import Callable
+
 import numpy as np
 from imgui_bundle import imgui
 
@@ -29,6 +32,20 @@ def resolve_time_reference(num_frames, frame_timings=None, ref_range=None, axis=
         ref_range = {axis: (0, num_frames, 1)}
         frame_timings = np.arange(num_frames)
     return ref_range, frame_timings
+
+
+def nearest_frame(frame_timings: np.ndarray, value: float) -> int:
+    """The index of the frame in sorted ``frame_timings`` nearest ``value``."""
+    i = int(np.clip(np.searchsorted(frame_timings, value), 1, len(frame_timings) - 1))
+    return i - 1 if value - frame_timings[i - 1] <= frame_timings[i] - value else i
+
+
+def frame_slider_map(frame_timings: np.ndarray) -> Callable[[float], int]:
+    """
+    The fastplotlib slider map that sends a slider value to the nearest frame. An array given as the map is used through
+    its ``searchsorted``, which sends a value just past a frame to the next one.
+    """
+    return partial(nearest_frame, np.asarray(frame_timings, dtype=np.float64))
 
 
 HANDLE_THICKNESS = 14.0
