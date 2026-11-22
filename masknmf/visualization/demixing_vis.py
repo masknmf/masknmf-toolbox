@@ -56,7 +56,7 @@ from masknmf.visualization.imgui.run_record import RECORD_LABEL, RECORD_TIP, dra
 from masknmf.visualization.imgui.scale import scale_figure
 from masknmf.visualization.rois import MARKED_COLOR, SELECTED_ALPHA, FootprintSet
 from masknmf.visualization.summary_widget import SummaryImageViewer
-from masknmf.visualization.contrast import CONTRAST_METHODS
+from masknmf.visualization.contrast import CONTRAST_METHODS, VMAX_FIXED, VMIN_FIXED
 from masknmf.demixing import CellStats, estimate_temporal_demixed_raw, update_signals, write_curated
 from masknmf.diagnostics import pmd_autocovariance_diagnostics
 from masknmf.pipelines.configs.demixing_configs import NMFConfig
@@ -169,7 +169,8 @@ class SingleSessionDemixingVis:
     are off for it.
     ``panel_names`` maps any of those names to the one shown in its place (panel title, Panels matrix,
     right-click menu). ``canvas`` is the rendercanvas the figure draws on; None opens a window. ``contrast`` names
-    how each panel fits its color limits, a key of :data:`masknmf.visualization.contrast.CONTRAST_METHODS`.
+    how each panel fits its color limits, a key of :data:`masknmf.visualization.contrast.CONTRAST_METHODS`; the
+    default, fixed, opens every panel at vmin -0.05, vmax 1.0 without reading the movie.
 
     The Signals table always carries the results' own stats (:meth:`CellStats.from_results`: mean, std, snr
     and skew of each demixed trace; fit, resid and bkgd from the roi averages the results hold), hidden until
@@ -213,7 +214,7 @@ class SingleSessionDemixingVis:
         frame_batch_size: int = 300,
         panel_names: dict[str, str] | None = None,
         canvas=None,
-        contrast: str = "fastplotlib",
+        contrast: str = "fixed",
     ):
         if contrast not in CONTRAST_METHODS:
             raise ValueError(f"contrast is {contrast!r}; choose from {', '.join(CONTRAST_METHODS)}")
@@ -482,7 +483,7 @@ class SingleSessionDemixingVis:
             for name, array in self._panels.items():
                 self._panel_graphics[name] = self._ndw_fov[name].add_nd_image(
                     array, ["time", "m", "n"], ["m", "n"], slider_maps={"time": frame_timings}, compute_histogram=False,
-                    name=name,
+                    graphic_kwargs={"vmin": VMIN_FIXED, "vmax": VMAX_FIXED}, name=name,
                 )
                 self._fit_contrast(self._panel_graphics[name])
                 self._ndw_fov.figure[name].title = array.current
