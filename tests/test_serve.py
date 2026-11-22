@@ -209,3 +209,19 @@ def test_the_picker_sends_a_browser_to_the_list_and_refuses_a_path_outside_it(tm
 
     asyncio.run(picker_requests(server))
     server.close()
+
+
+@pytest.mark.parametrize(
+    "cmdline",
+    [
+        ["/env/bin/python", "-m", "masknmf.cli", "serve", "results.hdf5", "--port", "8811"],
+        ["/env/bin/python", "/env/bin/masknmf", "serve", "results.hdf5", "--port", "8811"],
+        [str(Path("env") / "Scripts" / "masknmf.exe"), "serve", "results.hdf5", "--port", "8811"],
+    ],
+)
+def test_serving_port_reads_each_way_masknmf_serve_starts(cmdline):
+    from masknmf import cli
+
+    assert cli.serving_port(cmdline=cmdline) == 8811
+    assert cli.serving_port(cmdline=[*cmdline[:-2], "--kill", "8811"]) is None
+    assert cli.serving_port(cmdline=[c.replace("serve", "view") for c in cmdline]) is None

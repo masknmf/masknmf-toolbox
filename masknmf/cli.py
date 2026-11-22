@@ -929,12 +929,21 @@ def open_demixing_viewer(
     return viewer
 
 
+def serve_arguments(cmdline: list[str]) -> Optional[list[str]]:
+    """The arguments after ``serve`` when a command line runs ``masknmf serve``, else None."""
+    # python -m masknmf.cli, or the masknmf console script run by its interpreter or on its own
+    index = next((i for i, arg in enumerate(cmdline[:3]) if arg == "masknmf.cli" or Path(arg).stem == "masknmf"), None)
+    if index is None or cmdline[index + 1 : index + 2] != ["serve"]:
+        return None
+    return cmdline[index + 2 :]
+
+
 def serving_port(cmdline: list[str]) -> Optional[int]:
     """The port a process serves on when its command line is a running ``masknmf serve``, else None."""
-    # NOTE: command_serve re-executes itself, so every server's command line has exactly this shape
-    if cmdline[1:4] != ["-m", "masknmf.cli", "serve"] or "--kill" in cmdline or "--kill-all" in cmdline:
+    arguments = serve_arguments(cmdline=cmdline)
+    if arguments is None or "--kill" in arguments or "--kill-all" in arguments:
         return None
-    return int(cmdline[cmdline.index("--port") + 1]) if "--port" in cmdline else PORT_SERVE
+    return int(arguments[arguments.index("--port") + 1]) if "--port" in arguments else PORT_SERVE
 
 
 def stop_servers(port: Optional[int]) -> None:
@@ -956,7 +965,8 @@ def stop_servers(port: Optional[int]) -> None:
         print("no masknmf serve is running" if port is None else f"no masknmf serve is running on port {port}")
         return
     for process, port_process in servers:
-        print(f"stopping port {port_process} (pid {process.pid}): {format_command(argv=process.info['cmdline'][4:])}")
+        arguments = serve_arguments(cmdline=process.info["cmdline"])
+        print(f"stopping port {port_process} (pid {process.pid}): {format_command(argv=arguments)}")
         process.terminate()
     _, alive = psutil.wait_procs([process for process, _ in servers], timeout=10)
     for process in alive:
@@ -975,12 +985,12 @@ def command_serve(args: argparse.Namespace) -> None:
     if args.kill is not None or args.kill_all:
         stop_servers(port=None if args.kill_all else args.kill)
         return
-    if os.environ.get("RENDERCANVAS_BACKEND") != "http":
-        # NOTE: importing masknmf imports fastplotlib, which fixes its event loop then, so the http loop has to be
-        # chosen before this process starts
-        env = {k: v for k, v in os.environ.items() if k not in ("RENDERCANVAS_FORCE_OFFSCREEN", "WGPU_FORCE_OFFSCREEN")}
-        env["RENDERCANVAS_BACKEND"] = "http"
-        os.execve(sys.executable, [sys.executable, "-m", "masknmf.cli", *args.argv], env)
+    # NOTE: rendercanvas.auto, which gives fastplotlib its loop, reads RENDERCANVAS_BACKEND once, when first imported
+    if "rendercanvas.auto" in sys.modules:
+        raise RuntimeError("rendercanvas.auto was imported before masknmf serve chose the http loop; keep fastplotlib out of the cli's imports")
+    for name in ("RENDERCANVAS_FORCE_OFFSCREEN", "WGPU_FORCE_OFFSCREEN"):
+        os.environ.pop(name, None)
+    os.environ["RENDERCANVAS_BACKEND"] = "http"
 
     from masknmf.visualization.canvas_server import SESSION_KEY_ENV, BrowserCanvas, CanvasServer
     from masknmf.visualization.imgui.options import OPTIONS
@@ -1307,7 +1317,6 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     args = build_parser(spec=spec, command=argv[0]).parse_args(argv)
     args.command = f"masknmf {format_command(argv=argv)}"
-    args.argv = argv
     args.handler(args)
 
 
