@@ -1,6 +1,7 @@
 """A figure on the http canvas, served to the fake browser in ``asgi_client`` as uvicorn would serve it."""
 
 import asyncio
+import re
 import sys
 from pathlib import Path
 
@@ -130,8 +131,9 @@ def test_the_picker_lists_one_row_per_results_file_by_folder_newest_run_first(tm
     page = results_picker.picker_html(str(tmp_path), files, path_open=files[1].path, error="a <b>")
     assert page.count("class='file") == 2 and page.count("class='file open'") == 1
     assert "a &lt;b&gt;" in page and "curated (1)" in page
-    # mouse holds only fov1, so the tree shows them as one folder
-    assert "<summary>mouse/fov1<" in page and "id='recent'" not in page
+    # mouse holds only fov1, so the tree shows them as one folder, collapsed
+    assert "<details class='surface' data-name='mouse/fov1'" in page and "id='recent'" not in page
+    assert re.search(r"<details[^>]* open[ >]", page) is None
 
 
 def test_the_picker_tree_sorts_folders_by_number_and_lists_the_newest_files_on_top():
@@ -144,7 +146,7 @@ def test_the_picker_tree_sorts_folders_by_number_and_lists_the_newest_files_on_t
     tree = folder_tree(files)
     assert list(tree["folders"]) == ["sweep"]
     page = picker_html("/data", files)
-    order = [page.index(f"<summary>epochs_{n}<") for n in (5, 10, 20, 30, 40, 50, 60, 100, 1000)]
+    order = [page.index(f"<summary><b>epochs_{n}</b>") for n in (5, 10, 20, 30, 40, 50, 60, 100, 1000)]
     assert order == sorted(order)
     recent = page[page.index("id='recent'") : page.index("id='tree'")]
     assert recent.count("class='file") == 8 and "epochs_1000/results.hdf5" in recent and "epochs_5/" not in recent

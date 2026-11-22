@@ -1,10 +1,10 @@
 """Serve a folder of results files to a browser: a page listing them, and the demixing viewer on the one picked.
 
 ``masknmf serve FOLDER`` runs this. ``files`` lists every results file below the folder, and every other pipeline's
-results an adapter finds by file name (miniALI's ALI_Result_new.mat, suite2p's stat.npy), as a tree of folders, the
-runs in each newest first, under the most recently changed files; a filter box narrows it and a click or Enter
-opens a file in the one viewer this process holds, at ``/``. The first pick builds the viewer, later picks load
-into it in place.
+results an adapter finds by file name (miniALI's ALI_Result_new.mat, suite2p's stat.npy), as a tree of folders that
+starts collapsed, the runs in each newest first, under the most recently changed files; a filter box narrows it and a
+click or Enter opens a file in the one viewer this process holds, at ``/``. The first pick builds the viewer, later
+picks load into it in place.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import fnmatch
 import html
 import os
 import re
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -39,8 +40,9 @@ SUFFIXES_STORE = (".zarr", ".n5")
 NAMES_SKIPPED = {"node_modules", "__pycache__", "site-packages"}
 MARKERS_ZARR = {".zgroup", ".zarray", "zarr.json"}
 NUM_RECENT = 8
-# a folder holding this many files or fewer starts with its subfolders open
-NUM_FILES_OPEN_ALL = 30
+NUM_PIPELINES_SHOWN = 3
+# runhub's dates: day and minute within a week, else the day
+NUM_DAYS_WITH_TIME = 7
 
 _PICKER = Template("""<!DOCTYPE html>
 <html>
@@ -48,46 +50,71 @@ _PICKER = Template("""<!DOCTYPE html>
     <meta charset='utf-8'>
     <title>$title</title>
     <style>
-        body { margin: 0; padding: 0 24px 24px; background: #1e1f22; color: #ddd; font: 14px system-ui, sans-serif; }
-        a { color: #7ab4ff; text-decoration: none; }
+        /* runhub's Material 3 dark roles */
+        :root { color-scheme: dark; --paper: #141218; --card: #1d1b20; --raised: #2b2930; --ink: #e6e0e9;
+                --muted: #cac4d0; --line: #49454f; --link: #d0bcff; --selected: #4a4458; --on-selected: #e8def8;
+                --bad: #f2b8b5; --good: #b5e3b0; --hover: rgba(230, 224, 233, 0.05); }
+        body { margin: 0; padding: 0 24px 32px; background: var(--paper); color: var(--ink);
+               font: 14px Roboto, 'Google Sans', system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+        a { color: var(--link); text-decoration: none; }
+        a:hover { text-decoration: underline; }
         [hidden] { display: none !important; }
-        header { position: sticky; top: 0; z-index: 1; display: flex; gap: 16px; align-items: baseline;
-                 flex-wrap: wrap; padding: 14px 0 10px; background: #1e1f22; }
-        header .root { font: 13px monospace; color: #999; }
-        header .muted, summary .muted { color: #888; font-weight: 400; }
-        #filter { flex: 1; min-width: 240px; padding: 6px 10px; background: #2b2d31; color: #ddd;
-                  border: 1px solid #444; border-radius: 4px; font: inherit; }
-        header button { padding: 2px 8px; background: none; color: #aaa; border: 1px solid #444; border-radius: 4px;
-                        font: 12px system-ui, sans-serif; cursor: pointer; }
-        .error { padding: 8px 12px; margin-bottom: 12px; background: #4a2326; border-radius: 4px; }
-        h2 { margin: 8px 0 4px; font-size: 13px; font-weight: 600; color: #999; text-transform: uppercase; }
+        header { position: sticky; top: 0; z-index: 1; padding: 18px 0 4px; background: var(--paper); }
+        h1 { margin: 0; font-size: 22px; font-weight: 400; }
+        .meta { color: var(--muted); font-size: 12px; font-weight: 400; }
+        .root { font-family: monospace; }
+        #filter { box-sizing: border-box; width: 100%; max-width: 576px; height: 44px; margin: 14px 0 10px; padding: 0 20px;
+                  background: var(--raised); color: var(--ink); border: none; border-radius: 9999px; outline: none; font: inherit; }
+        #filter::placeholder { color: rgba(202, 196, 208, 0.7); }
+        #filter:focus { box-shadow: 0 0 0 2px var(--link); }
+        .controls { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-bottom: 12px; }
+        .chip { display: inline-flex; box-sizing: border-box; height: 28px; align-items: center; padding: 0 12px;
+                background: none; color: var(--muted); border: 1px solid var(--line); border-radius: 8px;
+                font: 500 12px Roboto, system-ui, sans-serif; white-space: nowrap; cursor: pointer; }
+        .chip:hover { background: rgba(230, 224, 233, 0.08); color: var(--ink); text-decoration: none; }
+        .chip.on { background: var(--selected); color: var(--on-selected); border-color: transparent; }
+        .chip.small { height: 20px; padding: 0 8px; margin-left: 8px; font-size: 11px; cursor: inherit; }
+        .surface { margin-bottom: 8px; background: var(--card); border-radius: 12px; overflow: hidden; }
+        .error { padding: 10px 16px; margin-bottom: 12px; background: #4a2326; border-radius: 12px; }
+        .title { padding: 12px 16px 4px; }
+        h2 { margin: 24px 0 10px; font-size: 16px; font-weight: 500; }
+        summary { list-style: none; padding: 12px 16px; cursor: pointer; user-select: none; }
+        summary::-webkit-details-marker { display: none; }
+        summary::before { content: '\\25B8'; display: inline-block; width: 16px; color: var(--muted); }
+        details[open] > summary::before { content: '\\25BE'; }
+        summary:hover { background: var(--hover); }
+        summary .meta { margin-left: 10px; }
+        details details { border-top: 1px solid rgba(73, 69, 79, 0.6); }
+        details details > summary { padding: 8px 16px; }
+        .children { padding-left: 16px; }
         .scroll { overflow-x: auto; }
-        details > .children { margin-left: 18px; }
-        summary { padding: 4px 0; font-weight: 600; cursor: pointer; }
-        summary .muted { margin-left: 10px; font-size: 12px; }
-        table { border-collapse: collapse; width: 100%; min-width: 860px; table-layout: fixed; margin-bottom: 4px; }
-        td { padding: 4px 12px 4px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-             border-top: 1px solid #2f3136; }
-        td.when { width: 130px; } td.pipeline { width: 190px; } td.stages { width: 260px; }
-        td.curated { width: 90px; } td.num { width: 70px; }
+        table { width: 100%; min-width: 860px; border-collapse: collapse; table-layout: fixed; }
+        th { padding: 4px 12px 4px 0; color: var(--muted); font-size: 12px; font-weight: 400; text-align: left;
+             border-bottom: 1px solid var(--line); }
+        td { padding: 6px 12px 6px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+             border-bottom: 1px solid rgba(73, 69, 79, 0.6); }
+        tr:last-child td { border-bottom: none; }
+        th:first-child, td:first-child { padding-left: 16px; }
+        .when { width: 110px; } .pipeline { width: 170px; } .stages { width: 240px; } .curated { width: 90px; }
+        .num { width: 70px; text-align: right; font-variant-numeric: tabular-nums; } .folder { width: 220px; }
+        .status { width: 90px; } .actions { width: 210px; text-align: right; }
+        td.when, td.pipeline, td.stages, td.curated, td.num, td.folder { color: var(--muted); }
         tr.file { cursor: pointer; }
-        tr.file:hover, tr.file.active { background: #2b2d31; }
-        tr.file.active td:first-child { box-shadow: inset 2px 0 #aaa; padding-left: 8px; }
-        tr.open td:first-child { box-shadow: inset 3px 0 #7ab4ff; padding-left: 8px; }
-        td.folder, td.stages, td.curated, td.num { color: #999; }
-        td.num { text-align: right; font-variant-numeric: tabular-nums; }
+        tr.file:hover { background: var(--hover); }
+        tr.file.active { background: rgba(230, 224, 233, 0.08); }
+        tr.file.active td:first-child { box-shadow: inset 2px 0 var(--link); }
+        td.status.ready { color: var(--good); } td.status.opening { color: var(--muted); }
+        td.status.exited, td.reason { color: var(--bad); }
+        td.actions form { display: inline; margin-left: 4px; }
         body.opening { cursor: progress; opacity: 0.6; }
     </style>
 </head>
 <body>
     <header>
-        <strong>masknmf results</strong>
-        <span class='root'>$root</span>
-        <span class='muted'>$count</span>
-        <input id='filter' placeholder='filter by folder, run, pipeline or stage; arrows and Enter open' autofocus>
-        <button id='expand'>expand all</button>
-        <button id='collapse'>collapse all</button>
+        <h1>masknmf results</h1>
+        <span class='meta'><span class='root'>$root</span> · $count</span>
         $viewer
+        <br><input id='filter' placeholder='type to filter: folder, run, pipeline, stage; arrows and Enter open' autofocus>
     </header>
     $error
     $recent
@@ -114,6 +141,17 @@ _PICKER = Template("""<!DOCTYPE html>
             document.body.classList.add('opening')
             window.location = row.dataset.href
         }
+        function sortFolders (key) {
+            for (const container of document.querySelectorAll('#tree, #tree .children')) {
+                const children = [...container.children].filter((child) => child.matches('details'))
+                children.sort((a, b) => key === 'newest'
+                    ? Number(b.dataset.time) - Number(a.dataset.time)
+                    : a.dataset.name.localeCompare(b.dataset.name, undefined, { numeric: true, sensitivity: 'base' }))
+                container.append(...children)
+            }
+            for (const chip of document.querySelectorAll('[data-sort]')) { chip.classList.toggle('on', chip.dataset.sort === key) }
+            try { localStorage.setItem('masknmf-picker-sort', key) } catch (e) {}
+        }
 
         filter.addEventListener('input', () => {
             const words = filter.value.toLowerCase().split(/\\s+/).filter(Boolean)
@@ -124,7 +162,7 @@ _PICKER = Template("""<!DOCTYPE html>
             for (const folder of folders) {
                 const hit = folder.querySelector('tr.file:not([hidden])') !== null
                 folder.hidden = !hit
-                folder.open = words.length > 0 ? hit : folder.dataset.open === '1'
+                folder.open = words.length > 0 && hit
             }
             setActive(visibleRows()[0])
         })
@@ -148,11 +186,19 @@ _PICKER = Template("""<!DOCTYPE html>
                 filter.focus()
             }
         })
-        document.getElementById('expand').addEventListener('click', () => folders.forEach((folder) => { folder.open = true }))
-        document.getElementById('collapse').addEventListener('click', () => folders.forEach((folder) => { folder.open = false }))
+        for (const button of document.querySelectorAll('[data-expand]')) {
+            button.addEventListener('click', () => folders.forEach((folder) => { folder.open = button.dataset.expand === '1' }))
+        }
+        for (const button of document.querySelectorAll('[data-sort]')) {
+            button.addEventListener('click', () => sortFolders(button.dataset.sort))
+        }
         for (const row of document.querySelectorAll('tr.file')) {
             row.addEventListener('click', () => openRow(row))
         }
+        try {
+            if (localStorage.getItem('masknmf-picker-sort') === 'newest') { sortFolders('newest') }
+        } catch (e) {}
+
     </script>
 </body>
 </html>
@@ -359,31 +405,57 @@ def natural_key(name: str) -> list:
 
 
 def format_time(timestamp: float) -> str:
-    """A timestamp as the page shows it, to the minute."""
-    return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
+    """A timestamp as runhub shows it: ``Nov 14 16:20`` within a week of now, else ``2026-11-01``."""
+    time_then = datetime.fromtimestamp(timestamp)
+    if (datetime.now() - time_then).days < NUM_DAYS_WITH_TIME:
+        return time_then.strftime("%b %d %H:%M")
+    return time_then.strftime("%Y-%m-%d")
 
 
-def rows_html(files: list[ResultsFile], path_open: str | None, with_folder: bool) -> str:
-    """A table with one row per file; ``with_folder`` adds the folder each is listed under."""
+def rows_html(files: list[ResultsFile], paths_open: set[str], with_folder: bool) -> str:
+    """A table with one row per file, a file with a viewer open marked; ``with_folder`` adds the folder each is listed under."""
+    head_folder = "<th class='folder'>folder</th>" if with_folder else ""
     rows = []
     for file in files:
         curated = f"curated ({file.num_curated})" if file.is_curated else ""
         text = " ".join([file.folder, file.run, file.pipeline, file.name, *file.stages, curated]).lower()
         cell_folder = f"<td class='folder'>{html.escape(file.folder)}</td>" if with_folder else ""
+        chip_open = "<span class='chip on small'>open</span>" if file.path in paths_open else ""
         rows.append(
-            f"<tr class='file{' open' if file.path == path_open else ''}' data-text='{html.escape(text, quote=True)}' "
+            f"<tr class='file{' open' if chip_open else ''}' data-text='{html.escape(text, quote=True)}' "
             f"data-href='open?path={quote(file.path, safe='')}' title='{html.escape(file.path, quote=True)}'>"
             f"{cell_folder}<td class='when'>{format_time(file.time_run)}</td>"
-            f"<td class='pipeline'>{html.escape(file.pipeline)}</td><td class='name'>{html.escape(file.name)}</td>"
+            f"<td class='pipeline'>{html.escape(file.pipeline)}</td>"
+            f"<td class='name'>{html.escape(file.name)}{chip_open}</td>"
             f"<td class='stages'>{html.escape(', '.join(file.stages))}</td><td class='curated'>{curated}</td>"
             f"<td class='num'>{format_bytes(file.num_bytes)}</td></tr>"
         )
-    return f"<table>{''.join(rows)}</table>"
+    head = (
+        f"<tr>{head_folder}<th class='when'>run</th><th class='pipeline'>pipeline</th><th>file</th>"
+        "<th class='stages'>stages</th><th class='curated'></th><th class='num'>size</th></tr>"
+    )
+    return f"<div class='scroll'><table><thead>{head}</thead><tbody>{''.join(rows)}</tbody></table></div>"
 
 
-def folder_html(name: str, node: dict, path_open: str | None, is_open: bool) -> str:
+def folder_meta(files: list[ResultsFile], paths_open: set[str]) -> str:
+    """A folder's summary line: how many results, curated and open, its pipelines and its newest change."""
+    counts_pipeline = Counter(file.pipeline for file in files if file.pipeline)
+    parts = [f"{len(files)} result{'s' if len(files) != 1 else ''}"]
+    num_curated = sum(file.is_curated for file in files)
+    if num_curated:
+        parts.append(f"{num_curated} curated")
+    if counts_pipeline:
+        parts.append(", ".join(name for name, _ in counts_pipeline.most_common(NUM_PIPELINES_SHOWN)))
+    parts.append(f"latest {format_time(max(file.time_modified for file in files))}")
+    num_open = sum(file.path in paths_open for file in files)
+    chip = f"<span class='chip on small'>{num_open} open</span>" if num_open else ""
+    return f"<span class='meta'>{html.escape(' · '.join(parts))}</span>{chip}"
+
+
+def folder_html(name: str, node: dict, paths_open: set[str], depth: int) -> str:
     """
-    One folder of the tree: a collapsible header with its file count and newest change, its runs, its subfolders.
+    One folder of the tree, collapsed: a header with its file count, pipelines and newest change, then its runs
+    and subfolders.
 
     Parameters
     ----------
@@ -391,11 +463,10 @@ def folder_html(name: str, node: dict, path_open: str | None, is_open: bool) -> 
         The folder's name, or ``a/b`` for merged folders.
     node : dict
         Its subtree from ``folder_tree``.
-    path_open : str, optional
-        The file the viewer holds; the folders above it start open.
-    is_open : bool
-        Start open whatever ``path_open`` is. Subfolders start open when this folder holds at most
-        ``NUM_FILES_OPEN_ALL`` files.
+    paths_open : set[str]
+        The files with a viewer open; their rows and the folders above them are marked.
+    depth : int
+        0 for a folder of the served one, which shows as a card.
 
     Returns
     -------
@@ -403,24 +474,24 @@ def folder_html(name: str, node: dict, path_open: str | None, is_open: bool) -> 
         The html.
     """
     below = files_below(node)
-    is_open = is_open or any(file.path == path_open for file in below)
     files = sorted(node["files"], key=lambda file: (-file.time_run, file.name))
-    table = rows_html(files, path_open, with_folder=False) if files else ""
+    table = rows_html(files, paths_open, with_folder=False) if files else ""
     children = "".join(
-        folder_html(name_child, child, path_open, is_open=len(below) <= NUM_FILES_OPEN_ALL)
+        folder_html(name_child, child, paths_open, depth=depth + 1)
         for name_child, child in sorted(node["folders"].items(), key=lambda item: natural_key(item[0]))
     )
     newest = max(file.time_modified for file in below)
+    card = " class='surface'" if depth == 0 else ""
     return (
-        f"<details data-open='{int(is_open)}'{' open' if is_open else ''}><summary>{html.escape(name)}"
-        f"<span class='muted'>{len(below)} · {format_time(newest)}</span></summary>"
+        f"<details{card} data-name='{html.escape(name, quote=True)}' data-time='{newest:.0f}'>"
+        f"<summary><b>{html.escape(name)}</b>{folder_meta(below, paths_open)}</summary>"
         f"<div class='children'>{table}{children}</div></details>"
     )
 
 
 def picker_html(folder: str, files: list[ResultsFile], path_open: str | None = None, error: str = "") -> str:
     """
-    The page listing the results files: the most recently changed on top, then all of them as a folder tree.
+    The page listing the results files: the most recently changed on top, then all of them as a collapsed folder tree.
 
     Parameters
     ----------
@@ -438,25 +509,35 @@ def picker_html(folder: str, files: list[ResultsFile], path_open: str | None = N
     str
         The html.
     """
+    paths_open = set() if path_open is None else {path_open}
     tree = folder_tree(files)
     recent = ""
     if len(files) > NUM_RECENT:
         newest = sorted(files, key=lambda file: -file.time_modified)[:NUM_RECENT]
-        recent = f"<section id='recent'><h2>recent</h2><div class='scroll'>{rows_html(newest, path_open, with_folder=True)}</div></section>"
-    blocks = [rows_html(tree["files"], path_open, with_folder=False)] if tree["files"] else []
+        recent = (
+            f"<details id='recent' class='surface' open><summary><b>recent</b>"
+            f"<span class='meta'>the {NUM_RECENT} files changed last</span></summary>{rows_html(newest, paths_open, with_folder=True)}</details>"
+        )
+    blocks = [f"<div class='surface'>{rows_html(tree['files'], paths_open, with_folder=False)}</div>"] if tree["files"] else []
     blocks += [
-        folder_html(name, child, path_open, is_open=True)
+        folder_html(name, child, paths_open, depth=0)
         for name, child in sorted(tree["folders"].items(), key=lambda item: natural_key(item[0]))
     ]
+    controls = (
+        "<div class='controls'><span class='meta'>sort by&nbsp;</span>"
+        "<button class='chip on' data-sort='name'>name</button><button class='chip' data-sort='newest'>newest</button>"
+        "<span class='meta'>&nbsp;·&nbsp;</span><button class='chip' data-expand='1'>expand all</button>"
+        "<button class='chip' data-expand='0'>collapse all</button></div>"
+    )
     return _PICKER.substitute(
         title=f"{Path(folder).name} - masknmf",
         root=html.escape(folder),
         count=f"{len(files)} files",
-        viewer="" if path_open is None else f"<a href='./'>viewer: {html.escape(Path(path_open).name)}</a>",
         error=f"<div class='error'>{html.escape(error)}</div>" if error else "",
+        viewer="" if path_open is None else f"<a class='chip' href='./'>viewer: {html.escape(Path(path_open).name)}</a>",
         recent=recent,
         tree=(
-            f"<section id='tree'><h2>all</h2><div class='scroll'>{''.join(blocks)}</div></section>"
+            f"<h2>folders</h2>{controls}<section id='tree'>{''.join(blocks)}</section>"
             if files
             else "<p>No masknmf results files below this folder.</p>"
         ),
