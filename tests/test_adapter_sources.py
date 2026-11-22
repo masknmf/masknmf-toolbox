@@ -1,13 +1,16 @@
-"""suite2p plane folders, caiman files, miniALI .mat files and GIAnT runs open like results files, through their adapters."""
+"""suite2p plane folders, caiman files, miniALI .mat files, GIAnT runs and ALI .mat files open like results files, through their adapters."""
 
 import h5py
 import numpy as np
 import pytest
 import scipy.sparse as sp
+import torch
 
 import masknmf
 from masknmf import cli
-from masknmf.demixing._adapters import CaimanResults, GiantResults, MiniALIResults, Suite2pResults, adapter_for, suite2p_frame_rate
+from masknmf.demixing._adapters import ALIResults, CaimanResults, GiantResults, MiniALIResults, Suite2pResults, adapter_for, suite2p_frame_rate
+from masknmf.demixing._adapters._ali_adapter import running_median
+from masknmf.demixing._adapters._miniali_adapter import roi_average_operator
 from masknmf.demixing._base_results import BaseResults
 from masknmf.io import OpenedResults, load_movie
 
@@ -576,3 +579,121 @@ def test_a_giant_matlab_run_opens_with_its_profiles_traces_shifts_and_activity_c
     np.testing.assert_array_equal(opened.shifts, shifts)
     # frame t of the activity channel is page GIANT_CHANNELS * t + (activityChannel - 1)
     np.testing.assert_array_equal(opened.registered[[3, 11]][:, 0, 0], [31, 111])
+
+
+ALI_WINDOW = 4
+ALI_CENTERS = ((4, 5), (10, 13))
+
+
+def write_ali_file(path, num_frames: int = FRAMES) -> dict:
+    """
+    Writes ali.mat as run_ali.m saves it: arrays transposed, 1-based indices, footprints negative disks of radius 3,
+    params a struct of scalars. Returns the footprints (pixels, clusters) and traces_ls (frames, clusters) it wrote.
+    """
+    rng = np.random.default_rng(4)
+    rows, cols, clusters, values = [], [], [], []
+    for k, (r0, c0) in enumerate(ALI_CENTERS):
+        rr, cc = np.nonzero((np.arange(HEIGHT)[:, None] - r0) ** 2 + (np.arange(WIDTH)[None, :] - c0) ** 2 <= 9)
+        rows.append(rr)
+        cols.append(cc)
+        clusters.append(np.full(rr.size, k))
+        values.append(-rng.random(rr.size) - 0.5)
+    rows, cols, clusters, values = (np.concatenate(v) for v in (rows, cols, clusters, values))
+    traces_ls = rng.standard_normal((num_frames, len(ALI_CENTERS))).astype(np.float32)
+    spike_frame, spike_cluster = np.array([3, 17, 25]), np.array([0, 1, 0])
+    with h5py.File(path, "w") as f:
+        f["traces"] = np.maximum(traces_ls, 0).T
+        f["traces_ls"] = traces_ls.T
+        f["centers"] = (np.array(ALI_CENTERS, np.float64) + 1).T
+        for name, data in (("footprint_row", rows + 1), ("footprint_col", cols + 1), ("footprint_cluster", clusters + 1),
+                           ("footprint_value", values), ("spike_frame", spike_frame + 1), ("spike_cluster", spike_cluster + 1)):
+            f[name] = data.astype(np.float64)[:, None].T
+        params = {"fs": 800.0, "win": float(ALI_WINDOW), "num_frames": float(num_frames), "th_spike": 3.5, "tile_core": 32.0}
+        for name, value in params.items():
+            f[f"params/{name}"] = np.array([[value]])
+    footprints = sp.csc_matrix((values, (rows * WIDTH + cols, clusters)), shape=(HEIGHT * WIDTH, len(ALI_CENTERS)))
+    return {"footprints": footprints, "traces_ls": traces_ls}
+
+
+@pytest.fixture
+def ali(tmp_path):
+    folder = tmp_path / "ali_run"
+    folder.mkdir()
+    written = write_ali_file(folder / "ali.mat")
+    write_miniali_recording(tmp_path / "recording")
+    return {"path": folder / "ali.mat", "recording": tmp_path / "recording", **written}
+
+
+def medfilt1_truncate(x: np.ndarray, window: int) -> np.ndarray:
+    """medfilt1(x, window, 'truncate') along axis 0, written out from MATLAB's documentation."""
+    return np.stack([np.median(x[max(t - window // 2, 0):t + (window - 1) // 2 + 1], axis=0) for t in range(len(x))])
+
+
+def test_the_running_median_is_medfilt1_with_truncated_ends():
+    x = torch.tensor([5.0, 1, 4, 2, 8, 3])[:, None, None]
+    medians = running_median(x, np.arange(6), 0, 6, 4)
+    assert medians.ravel().tolist() == [3.0, 4.0, 3.0, 3.0, 3.5, 3.0]
+    assert running_median(x, np.arange(6), 0, 6, 3).ravel().tolist() == [3.0, 4.0, 2.0, 4.0, 3.0, 5.5]
+
+
+def test_an_ali_file_is_found_from_the_file_or_its_folder(tmp_path, ali):
+    assert ALIResults.expand(ali["path"]) == ALIResults.expand(ali["path"].parent) == [ali["path"]]
+    assert adapter_for(ali["path"]) is ALIResults and adapter_for(ali["path"].parent) is ALIResults
+    assert ALIResults.describe(ali["path"]) == "ali: 2 clusters, the first 40 frames, 3 spikes"
+    write_miniali_file(tmp_path / "ALI_Result_new.mat")
+    assert not ALIResults.matches(tmp_path / "ALI_Result_new.mat")
+
+
+def test_an_ali_file_opens_with_the_movie_it_read_and_inverts_its_footprints(ali):
+    opened = OpenedResults.open(ali["path"], raw=ali["recording"])
+    results = opened.results
+    assert isinstance(results, ALIResults) and results.shape == (FRAMES, HEIGHT, WIDTH) and results.num_frames_raw == FRAMES + 4
+    assert opened.raw is results.raw_array and results.registered_array is results.raw_array and opened.skipped == []
+    assert results.frame_rate == 800.0 and results.num_sources == 2 and results.params["th_spike"] == 3.5
+    assert np.allclose(results.spatial_demixed.to_dense().numpy(), -ali["footprints"].toarray())
+    assert torch.equal(results.temporal_demixed_raw, torch.from_numpy(ali["traces_ls"]))
+    assert torch.equal(results.temporal_demixed, torch.from_numpy(np.maximum(ali["traces_ls"], 0)))
+    assert np.array_equal(results.centers, np.array(ALI_CENTERS, np.float32))
+    assert [frames.tolist() for frames in results.spike_frames] == [[3, 25], [17]]
+    with pytest.raises(ValueError, match="need the movie ALI read"):
+        OpenedResults.open(ali["path"])
+    with pytest.raises(ValueError, match="ALI processed 40"):
+        ALIResults(ali["path"], raw_video=np.zeros((FRAMES - 1, HEIGHT, WIDTH), np.uint8), device="cpu")
+    with pytest.raises(ValueError, match="outside the 8 x 20 movie"):
+        ALIResults(ali["path"], raw_video=np.zeros((FRAMES, 8, WIDTH), np.uint8), device="cpu")
+
+
+def test_ali_residual_is_minus_df_less_the_footprints_fit(ali):
+    results = ALIResults(ali["path"], raw_video=load_movie(ali["recording"]), device="cpu")
+    movie = np.asarray(load_movie(ali["recording"])[:FRAMES], np.float64)
+    df = movie - medfilt1_truncate(movie, ALI_WINDOW)
+    fit = (ali["footprints"] @ ali["traces_ls"].T).T.reshape(FRAMES, HEIGHT, WIDTH)
+    residual = results.raw_residual_array[:].numpy()
+    assert np.allclose(residual, -(df - fit), atol=1e-3)
+    inverted = results.raw_array[:].numpy()
+    explained = results.fluctuating_background_array[:].numpy() + results.signals_array[:].numpy() + residual
+    assert np.allclose(inverted, explained, atol=1e-3)
+    assert torch.equal(results.fluctuating_background_array[[30, 2, 3]], results.fluctuating_background_array[:][[30, 2, 3]])
+
+
+def test_ali_roi_averages_are_the_movies_averaged_over_each_footprint(ali):
+    results = ALIResults(ali["path"], raw_video=load_movie(ali["recording"]), device="cpu")
+    assert results.residual_roi_averages is None and results.fluctuating_background_roi_averages is None
+    results.compute_roi_averages(frame_batch_size=16)
+    operator = roi_average_operator(ali["footprints"])
+    for averages, movie in ((results.residual_roi_averages, results.raw_residual_array),
+                            (results.signal_roi_averages, results.signals_array),
+                            (results.fluctuating_background_roi_averages, results.fluctuating_background_array)):
+        assert averages.shape == (2, FRAMES)
+        assert np.allclose(averages.numpy(), operator @ movie[:].numpy().reshape(FRAMES, -1).T, atol=1e-3)
+
+
+def test_view_lists_an_ali_file_and_opens_it_with_its_movie(ali, monkeypatch, capsys):
+    import fastplotlib as fpl
+
+    cli.main(["view", str(ali["path"]), "--list"])
+    assert "ali: 2 clusters, the first 40 frames, 3 spikes" in capsys.readouterr().out
+    monkeypatch.setattr(masknmf, "SingleSessionDemixingVis", RecordingViewer)
+    monkeypatch.setattr(fpl.loop, "run", lambda: None)
+    cli.main(["view", str(ali["path"]), "--raw", str(ali["recording"]), "--device", "cpu"])
+    assert isinstance(RecordingViewer.results, ALIResults)
