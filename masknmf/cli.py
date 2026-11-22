@@ -999,9 +999,10 @@ def stop_servers(port: Optional[int]) -> None:
 def command_serve(args: argparse.Namespace) -> None:
     """
     Serve the demixing viewer of one results file to a browser: rendered on this machine, streamed as frames, with
-    the browser's pointer and keys sent back. A folder serves a page listing the results files below it, and the
-    viewer on the one picked there; no results serves the launcher, whose action runs on this machine in the
-    background. It listens on localhost; from another machine, tunnel the port over ssh.
+    the browser's pointer and keys sent back. A folder serves a page listing the results files below it; each one
+    picked there opens in a viewer process of its own, which the page lists to go back to or stop. No results serves
+    the launcher, whose action runs on this machine in the background. It listens on localhost; from another machine,
+    tunnel the port over ssh.
     --kill and --kill-all stop running servers instead.
     """
     if args.kill is not None or args.kill_all:
@@ -1040,7 +1041,7 @@ def command_serve(args: argparse.Namespace) -> None:
             fail("--raw names one file's movie; serve that results file on its own")
         from masknmf.visualization.results_picker import PickerServer
 
-        server = PickerServer(args.results, open_viewer=open_demixing_viewer, args=args, host=args.host, port=args.port)
+        server = PickerServer(args.results, options=viewer_options(args=args), launch_viewer=launch_viewer, host=args.host, port=args.port)
         print(f"results files below {server.folder} at {server.url}")
     else:
         filepath_results = args.results

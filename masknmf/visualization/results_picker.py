@@ -1,19 +1,26 @@
-"""Serve a folder of results files to a browser: a page listing them, and the demixing viewer on the one picked.
+"""Serve a folder of results files to a browser: a page listing them, and a demixing viewer on each one picked.
 
 ``masknmf serve FOLDER`` runs this. ``files`` lists every results file below the folder, and every other pipeline's
 results an adapter finds by file name (miniALI's ALI_Result_new.mat, suite2p's stat.npy), as a tree of folders that
 starts collapsed, the runs in each newest first, under the most recently changed files; a filter box narrows it and a
-click or Enter opens a file in the one viewer this process holds, at ``/``. The first pick builds the viewer, later
-picks load into it in place.
+click or Enter opens a file. Each file opens in a ``masknmf serve FILE`` process of its own on a free localhost port,
+which this server passes through at ``v/<id>/``, so only its own port needs a tunnel. The files page lists the open
+viewers on top, to go back to one or stop its process.
 """
 
 from __future__ import annotations
 
-import argparse
+import asyncio
 import fnmatch
 import html
+import json
 import os
 import re
+import secrets
+import socket
+import subprocess
+import tempfile
+import time
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
@@ -28,13 +35,15 @@ from rendercanvas.http import resources
 from masknmf.demixing._adapters import adapter_for, adapter_patterns
 from masknmf.demixing.curation import CURATED_SUFFIX, latest_results, results_stem
 from masknmf.io import stage_groups
-from masknmf.visualization.canvas_server import BrowserCanvas, CanvasServer, page_html
+from masknmf.visualization.canvas_server import SESSION_KEY_ENV, SESSION_KEY_HEADER, client_js, page_html, require
 
-__all__ = ["PickerServer", "ResultsFile", "find_results", "picker_html"]
+__all__ = ["PickerServer", "ResultsFile", "ViewerProcess", "find_results", "picker_html"]
 
 PATTERNS_RESULTS = ("*results*.hdf5", "*results*.h5")
 # a run folder is named <timestamp>_<pipeline>
 PATTERN_RUN = re.compile(r"^(\d{8}T\d{6})_(.+)$")
+# a viewer's pages and websocket, ``v/<id>/<resource>``
+PATTERN_VIEWER = re.compile(r"/v/(\d+)/([^/]*)$")
 # folders of chunked arrays, code or caches: thousands of entries and never a results file
 SUFFIXES_STORE = (".zarr", ".n5")
 NAMES_SKIPPED = {"node_modules", "__pycache__", "site-packages"}
@@ -43,6 +52,7 @@ NUM_RECENT = 8
 NUM_PIPELINES_SHOWN = 3
 # runhub's dates: day and minute within a week, else the day
 NUM_DAYS_WITH_TIME = 7
+SECONDS_STOP = 5.0
 
 _PICKER = Template("""<!DOCTYPE html>
 <html>
@@ -113,10 +123,10 @@ _PICKER = Template("""<!DOCTYPE html>
     <header>
         <h1>masknmf results</h1>
         <span class='meta'><span class='root'>$root</span> · $count</span>
-        $viewer
         <br><input id='filter' placeholder='type to filter: folder, run, pipeline, stage; arrows and Enter open' autofocus>
     </header>
     $error
+    $viewers
     $recent
     $tree
     <script>
@@ -199,6 +209,25 @@ _PICKER = Template("""<!DOCTYPE html>
             if (localStorage.getItem('masknmf-picker-sort') === 'newest') { sortFolders('newest') }
         } catch (e) {}
 
+        const rowsViewer = [...document.querySelectorAll('#viewers tr[data-viewer]')]
+        async function refreshViewers () {
+            if (document.hidden) { return }
+            const response = await fetch('viewers.json', { cache: 'no-store' })
+            const viewers = new Map((await response.json()).map((viewer) => [String(viewer.id), viewer]))
+            for (const row of rowsViewer) {
+                const viewer = viewers.get(row.dataset.viewer)
+                if (viewer === undefined) { row.hidden = true; continue }
+                const status = row.querySelector('td.status')
+                status.textContent = viewer.status
+                status.className = 'status ' + viewer.status.split(' ')[0]
+                row.querySelector('td.memory').textContent = viewer.memory
+            }
+        }
+        if (rowsViewer.length > 0) { setInterval(refreshViewers, 2000) }
+        // NOTE: chrome restores a no-store page from its back-forward cache too, with the viewers listed before the pick
+        window.addEventListener('pageshow', (event) => { if (event.persisted) { location.reload() } })
+        // the folders start collapsed again, so the old scroll offset would only hide the open viewers under the header
+        history.scrollRestoration = 'manual'
     </script>
 </body>
 </html>
@@ -243,6 +272,40 @@ class ResultsFile:
     def pipeline(self) -> str:
         match = PATTERN_RUN.match(self.run)
         return self.adapter or ("" if match is None else match.group(2))
+
+
+@dataclass
+class ViewerProcess:
+    """One results file open in a ``masknmf serve FILE`` process of its own, listening on ``port`` behind ``key``."""
+
+    id: int
+    path: str
+    port: int
+    key: str
+    process: subprocess.Popen
+    filepath_log: str
+    time_started: float
+
+    @property
+    def status(self) -> str:
+        """``opening`` until the viewer listens on its port, then ``ready``; ``exited <code>`` once the process ends."""
+        code = self.process.poll()
+        if code is not None:
+            return f"exited {code}"
+        return "ready" if port_listening(port=self.port) else "opening"
+
+    @property
+    def num_bytes(self) -> int:
+        """The process's resident memory; 0 once it has exited."""
+        try:
+            return psutil.Process(self.process.pid).memory_info().rss
+        except psutil.NoSuchProcess:
+            return 0
+
+    def last_line(self) -> str:
+        """The last line the process wrote to its log, which names the error of one that exited."""
+        lines = [line for line in Path(self.filepath_log).read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()]
+        return lines[-1] if lines else ""
 
 
 def find_results(folder: str | os.PathLike) -> list[ResultsFile]:
@@ -489,9 +552,44 @@ def folder_html(name: str, node: dict, paths_open: set[str], depth: int) -> str:
     )
 
 
-def picker_html(folder: str, files: list[ResultsFile], path_open: str | None = None, error: str = "") -> str:
+def viewers_html(viewers: list[ViewerProcess], folder: str) -> str:
+    """The open viewers, each with its status and memory, a link back to it and a button that stops its process."""
+    if len(viewers) == 0:
+        return ""
+    rows = []
+    for viewer in viewers:
+        status = viewer.status
+        is_exited = status.startswith("exited")
+        place = Path(viewer.path).parent.relative_to(folder).as_posix()
+        cell_place = (
+            f"<td class='reason' title='log: {html.escape(viewer.filepath_log, quote=True)}'>{html.escape(viewer.last_line())}</td>"
+            if is_exited
+            else f"<td class='folder'>{html.escape(place)}</td>"
+        )
+        link = f"<a class='chip' href='v/{viewer.id}/'>view</a>" if not is_exited else ""
+        rows.append(
+            f"<tr data-viewer='{viewer.id}'><td class='name' title='{html.escape(viewer.path, quote=True)}'>"
+            f"<a href='v/{viewer.id}/'>{html.escape(Path(viewer.path).name)}</a></td>{cell_place}"
+            f"<td class='status {status.split()[0]}'>{status}</td><td class='when'>{format_time(viewer.time_started)}</td>"
+            f"<td class='num memory'>{format_bytes(viewer.num_bytes) if not is_exited else ''}</td>"
+            f"<td class='actions'>{link}<form method='post' action='stop?id={viewer.id}'>"
+            f"<button class='chip'>{'remove' if is_exited else 'stop process'}</button></form></td></tr>"
+        )
+    head = (
+        "<tr><th>file</th><th>folder</th><th class='status'>status</th><th class='when'>opened</th>"
+        "<th class='num'>memory</th><th class='actions'></th></tr>"
+    )
+    return (
+        f"<section id='viewers' class='surface'><div class='title'><b>open</b>"
+        f"<span class='meta'> · {len(viewers)} viewer process{'es' if len(viewers) != 1 else ''}</span></div>"
+        f"<div class='scroll'><table><thead>{head}</thead><tbody>{''.join(rows)}</tbody></table></div></section>"
+    )
+
+
+def picker_html(folder: str, files: list[ResultsFile], viewers: list[ViewerProcess] = (), error: str = "") -> str:
     """
-    The page listing the results files: the most recently changed on top, then all of them as a collapsed folder tree.
+    The page listing the results files: the open viewers, the most recently changed files, then all of them as a
+    collapsed folder tree.
 
     Parameters
     ----------
@@ -499,8 +597,8 @@ def picker_html(folder: str, files: list[ResultsFile], path_open: str | None = N
         The served folder, shown in the header.
     files : list[ResultsFile]
         What ``find_results`` returned.
-    path_open : str, optional
-        The file the viewer holds; its row is marked and the header links to the viewer.
+    viewers : list[ViewerProcess]
+        The viewer processes this server started and has not stopped.
     error : str
         Why the last pick did not open.
 
@@ -509,7 +607,7 @@ def picker_html(folder: str, files: list[ResultsFile], path_open: str | None = N
     str
         The html.
     """
-    paths_open = set() if path_open is None else {path_open}
+    paths_open = {viewer.path for viewer in viewers if viewer.process.poll() is None}
     tree = folder_tree(files)
     recent = ""
     if len(files) > NUM_RECENT:
@@ -534,7 +632,7 @@ def picker_html(folder: str, files: list[ResultsFile], path_open: str | None = N
         root=html.escape(folder),
         count=f"{len(files)} files",
         error=f"<div class='error'>{html.escape(error)}</div>" if error else "",
-        viewer="" if path_open is None else f"<a class='chip' href='./'>viewer: {html.escape(Path(path_open).name)}</a>",
+        viewers=viewers_html(list(viewers), folder),
         recent=recent,
         tree=(
             f"<h2>folders</h2>{controls}<section id='tree'>{''.join(blocks)}</section>"
@@ -544,102 +642,266 @@ def picker_html(folder: str, files: list[ResultsFile], path_open: str | None = N
     )
 
 
-class PickedViewer:
-    """What a CanvasServer shows and closes: nothing until a file is picked, then that file's demixing viewer."""
-
-    def __init__(self):
-        self.viewer = None
-
-    @property
-    def figure(self):
-        return self.viewer.figure
-
-    def show(self):
-        if self.viewer is not None:
-            self.viewer.show()
-
-    def close(self):
-        if self.viewer is not None:
-            self.viewer.close()
+def free_port() -> int:
+    """A localhost port nothing listens on."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
 
 
-class PickerServer(CanvasServer):
+def port_listening(port: int) -> bool:
+    """Whether something accepts connections on a localhost port."""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+            return True
+    except OSError:
+        return False
+
+
+def stop_process(process: subprocess.Popen) -> None:
+    """Ask a process to stop, and kill it when it has not within ``SECONDS_STOP``."""
+    process.terminate()
+    try:
+        process.wait(timeout=SECONDS_STOP)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
+class PickerServer:
     """
-    The results files below a folder at ``files``, and the demixing viewer on the picked one at ``/``.
-
-    One viewer, so one file open at a time: a pick replaces what every connected browser sees.
+    The results files below a folder at ``files``, and a viewer process per picked file at ``v/<id>/``.
 
     Parameters
     ----------
     folder : str | os.PathLike
         The folder whose results files are listed; only those can be opened.
-    open_viewer : Callable
-        Builds the viewer of the first pick: ``open_viewer(args=, filepath_results=, names_present=, canvas=)``.
-    args : argparse.Namespace
-        The parsed ``serve`` options, handed to ``open_viewer``.
+    options : list[str]
+        The ``masknmf serve`` options every viewer process takes, after its file, host and port.
+    launch_viewer : Callable
+        Starts ``masknmf <argv>``: ``launch_viewer(argv=, filepath_log=, env_extra=, detach=)`` returns its ``subprocess.Popen``.
     host, port : str, int
         Where ``serve`` listens.
     """
 
-    def __init__(self, folder: str | os.PathLike, open_viewer: Callable, args: argparse.Namespace, *, host: str, port: int):
+    def __init__(
+        self, folder: str | os.PathLike, options: list[str], launch_viewer: Callable, *, host: str, port: int
+    ):
         self.folder = str(Path(folder).expanduser().resolve())
-        self.open_viewer = open_viewer
-        self.args = args
-        self.path_open = None
-        self._canvas = BrowserCanvas(size=(1600, 1000), max_fps=60.0)
-        super().__init__(
-            PickedViewer(), title=f"{Path(self.folder).name} - masknmf", waiting="Opening ...", host=host, port=port
-        )
+        self.options = list(options)
+        self.launch_viewer = launch_viewer
+        self.host = str(host)
+        self.port = int(port)
+        self.viewers: dict[int, ViewerProcess] = {}
+        self.dir_logs = Path(tempfile.gettempdir()) / "masknmf-serve"
+        self.resources = {**resources, "renderview-client.js": ("text/javascript", client_js())}
+        self._num_started = 0
+        self._server = None
 
     @property
-    def canvas(self):
-        return self._canvas
+    def url(self) -> str:
+        host = "localhost" if self.host in ("0.0.0.0", "::") else self.host
+        return f"http://{host}:{self.port}/"
 
-    def open(self, path: str) -> None:
-        """Show the results file at ``path`` in the viewer; it has to be one ``find_results`` lists."""
+    def open(self, path: str) -> ViewerProcess:
+        """The viewer process of the results file at ``path``, started when none is running; it has to be one ``find_results`` lists."""
         if path not in [file.path for file in find_results(folder=self.folder)]:
             raise ValueError(f"{path} is not a results file below {self.folder}")
-        if self.vis.viewer is None:
-            adapter = adapter_for(path)
-            names_present = stage_groups(path) if adapter is None else [adapter.describe(Path(path))]
-            self.vis.viewer = self.open_viewer(
-                args=self.args, filepath_results=path, names_present=names_present, canvas=self.canvas
-            )
-            self.vis.show()
-        else:
-            self.vis.viewer.load_results(path)
-        self.path_open = path
-        name = Path(path).name
-        resources["index.html"] = "text/html", page_html(f"{name} - masknmf", f"Opening {name} ...", home="files", home_label="files")
+        for viewer in list(self.viewers.values()):
+            if viewer.path != path:
+                continue
+            if viewer.process.poll() is None:
+                return viewer
+            del self.viewers[viewer.id]
+        self._num_started += 1
+        self.dir_logs.mkdir(exist_ok=True)
+        filepath_log = self.dir_logs / f"{datetime.now():%Y%m%dT%H%M%S}_{self._num_started}_{Path(path).stem}.log"
+        port, key = free_port(), secrets.token_urlsafe(16)
+        # NOTE: not detached, so closing this terminal or ctrl+c here stops the viewers with this server
+        process = self.launch_viewer(
+            argv=["serve", path, "--host", "127.0.0.1", "--port", str(port), *self.options],
+            filepath_log=filepath_log,
+            env_extra={SESSION_KEY_ENV: key},
+            detach=False,
+        )
+        viewer = ViewerProcess(
+            id=self._num_started, path=path, port=port, key=key, process=process, filepath_log=str(filepath_log), time_started=time.time()
+        )
+        self.viewers[viewer.id] = viewer
+        return viewer
+
+    def stop_viewer(self, id_viewer: int) -> None:
+        """Stop a viewer's process and drop it from the list."""
+        stop_process(self.viewers.pop(id_viewer).process)
+
+    def page(self, error: str = "") -> str:
+        """Returns the files page as it stands now; ``error`` says why the last pick did not open."""
+        return picker_html(self.folder, find_results(self.folder), list(self.viewers.values()), error)
 
     async def asgi(self, scope, receive, send):
-        """The picker's pages, then the canvas: ``files`` lists, ``open?path=`` picks, ``/`` is the viewer."""
-        if scope["type"] != "http":
-            await super().asgi(scope, receive, send)
+        """
+        ``files`` lists, ``open?path=`` starts or finds a viewer and sends the browser to it, ``stop?id=`` (a post)
+        stops one, ``viewers.json`` gives their status, and ``v/<id>/`` is a viewer's page, resources and websocket.
+        """
+        if scope["type"] == "lifespan":
+            await self.lifespan(receive, send)
+            return
+        match = PATTERN_VIEWER.search(scope["path"])
+        viewer = None if match is None else self.viewers.get(int(match.group(1)))
+        if scope["type"] == "websocket":
+            if viewer is None:
+                await send({"type": "websocket.close", "code": 1008})
+                return
+            await relay(viewer, receive, send)
+            return
+        if match is not None:
+            await self.respond_viewer(send, viewer, match.group(2))
             return
         name = scope["path"].rsplit("/", 1)[-1]
+        query = parse_qs(scope.get("query_string", b"").decode())
         if name == "open":
-            path = parse_qs(scope.get("query_string", b"").decode()).get("path", [""])[0]
+            path = query.get("path", [""])[0]
             try:
-                self.open(path)
-            # NOTE: SystemExit is how the cli's checks end a command; here it ends the pick, not the server
-            except (OSError, ValueError, SystemExit) as e:
-                reason = str(e) if not isinstance(e, SystemExit) else "it could not be opened; the server's terminal says why"
-                await respond(send, picker_html(self.folder, find_results(self.folder), self.path_open, f"{path}: {reason}"))
+                viewer = self.open(path)
+            except (OSError, ValueError) as e:
+                await respond(send, self.page(f"{path}: {e}"))
                 return
-            await redirect(send, "./")
+            await redirect(send, f"v/{viewer.id}/")
+        elif name == "stop" and scope["method"] == "POST":
+            id_viewer = int(query.get("id", ["0"])[0])
+            if id_viewer in self.viewers:
+                await asyncio.to_thread(self.stop_viewer, id_viewer)
+            await redirect(send, "files")
+        elif name == "viewers.json":
+            states = [
+                {"id": viewer.id, "status": viewer.status, "memory": format_bytes(viewer.num_bytes) if viewer.process.poll() is None else ""}
+                for viewer in self.viewers.values()
+            ]
+            await respond(send, json.dumps(states), content_type=b"application/json")
         elif name == "files":
-            await respond(send, picker_html(self.folder, find_results(self.folder), self.path_open))
-        elif name == "" and self.path_open is None:
+            await respond(send, self.page())
+        elif name == "":
             await redirect(send, "files")
         else:
-            await super().asgi(scope, receive, send)
+            await respond(send, "Not Found", status=404, content_type=b"text/plain")
+
+    async def lifespan(self, receive, send) -> None:
+        """Stops every viewer process when uvicorn shuts down."""
+        while True:
+            message = await receive()
+            if message["type"] == "lifespan.startup":
+                await send({"type": "lifespan.startup.complete"})
+            elif message["type"] == "lifespan.shutdown":
+                # NOTE: uvicorn re-raises the signal that stopped it once it has shut down, so a finally after run() never runs
+                await asyncio.to_thread(self.close)
+                await send({"type": "lifespan.shutdown.complete"})
+                return
+
+    async def respond_viewer(self, send, viewer: ViewerProcess | None, name: str) -> None:
+        """A viewer's page, served here so it shows while the process still opens the file, or one of its resources."""
+        if viewer is None and name == "status.json":
+            await respond(send, json.dumps({"status": "stopped", "reason": "this viewer was stopped"}), content_type=b"application/json")
+        elif viewer is None:
+            await redirect(send, "../../files")
+        elif name == "":
+            filename = Path(viewer.path).name
+            body = page_html(
+                f"{filename} - masknmf", f"Opening {filename} ...", home="../../files", home_label="files", wait_url="status.json"
+            )
+            await respond(send, body)
+        elif name == "status.json":
+            status = viewer.status
+            reason = f"the viewer exited: {viewer.last_line()}" if status.startswith("exited") else ""
+            await respond(send, json.dumps({"status": status, "reason": reason}), content_type=b"application/json")
+        elif name in self.resources:
+            content_type, body = self.resources[name]
+            await respond(send, body, content_type=content_type.encode())
+        else:
+            await respond(send, "Not Found", status=404, content_type=b"text/plain")
+
+    def serve(self) -> None:
+        """Run the server in this thread until it is interrupted; its shutdown stops every viewer process."""
+        uvicorn = require("uvicorn")
+        config = uvicorn.Config(
+            self.asgi, host=self.host, port=self.port, log_level="warning", interface="asgi3", lifespan="on", ws_per_message_deflate=False
+        )
+        self._server = uvicorn.Server(config)
+        try:
+            self._server.run()
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        for id_viewer in list(self.viewers):
+            self.stop_viewer(id_viewer)
 
 
-async def respond(send, body: str) -> None:
-    """Send one html page."""
-    await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"text/html; charset=utf-8")]})
-    await send({"type": "http.response.body", "body": body.encode()})
+async def relay(viewer: ViewerProcess, receive, send) -> None:
+    """Pass a browser's websocket through to its viewer process's, once the process listens; the browser's messages wait meanwhile."""
+    client = require("websockets.asyncio.client")
+    exceptions = require("websockets.exceptions")
+    await send({"type": "websocket.accept"})
+    upstream = None
+    while upstream is None and viewer.process.poll() is None:
+        try:
+            # frames are already compressed and a png frame exceeds the default 1 MiB; the viewer's loop may block
+            # for longer than a ping timeout while it computes
+            upstream = await client.connect(
+                f"ws://127.0.0.1:{viewer.port}/",
+                additional_headers={SESSION_KEY_HEADER: viewer.key},
+                compression=None,
+                max_size=None,
+                ping_interval=None,
+                proxy=None,
+            )
+        except OSError:
+            await asyncio.sleep(0.25)
+    if upstream is None:
+        reason = f"the viewer exited: {viewer.last_line()}".encode()[:120].decode(errors="ignore")
+        await send({"type": "websocket.close", "code": 1011, "reason": reason})
+        return
+    to_viewer = asyncio.create_task(browser_to_viewer(receive, upstream, exceptions.ConnectionClosed))
+    to_browser = asyncio.create_task(viewer_to_browser(upstream, send, exceptions.ConnectionClosed))
+    done, pending = await asyncio.wait({to_viewer, to_browser}, return_when=asyncio.FIRST_COMPLETED)
+    for task in pending:
+        task.cancel()
+    await upstream.close()
+    if to_browser in done and to_browser.result():
+        await send({"type": "websocket.close", "code": 1001, "reason": "the viewer stopped"})
+
+
+async def browser_to_viewer(receive, upstream, closed: type[Exception]) -> None:
+    """Forward the browser's messages until it disconnects or the viewer closes."""
+    while True:
+        message = await receive()
+        if message["type"] == "websocket.disconnect":
+            return
+        # NOTE: uvicorn's first message is websocket.connect, still queued since the accept went out unasked
+        if message["type"] != "websocket.receive":
+            continue
+        try:
+            await upstream.send(message["text"] if message.get("text") is not None else message["bytes"])
+        except closed:
+            return
+
+
+async def viewer_to_browser(upstream, send, closed: type[Exception]) -> bool:
+    """Forward the viewer's messages; True when the viewer closed, False when the browser was gone."""
+    try:
+        async for message in upstream:
+            await send({"type": "websocket.send", "text": message} if isinstance(message, str) else {"type": "websocket.send", "bytes": message})
+    except closed:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+async def respond(send, body: str | bytes, status: int = 200, content_type: bytes = b"text/html; charset=utf-8") -> None:
+    """Send one response, never cached, so going back to the files page shows the viewers open now."""
+    headers = [(b"content-type", content_type), (b"cache-control", b"no-store")]
+    await send({"type": "http.response.start", "status": status, "headers": headers})
+    await send({"type": "http.response.body", "body": body.encode() if isinstance(body, str) else body})
 
 
 async def redirect(send, location: str) -> None:
