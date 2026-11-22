@@ -175,6 +175,20 @@ def test_a_curated_file_keeps_every_group_the_curated_results_do_not_write(tmp_p
     assert pipeline.resume_source(curated, reuse_compression=True)[0] == Path(curated).resolve()
 
 
+def test_a_run_and_its_curated_file_store_the_compression_once(tmp_path, monkeypatch):
+    # the test movie's arrays are smaller than the size save_dict links
+    monkeypatch.setattr("masknmf.utils._serialization.NUM_BYTES_MIN_LINKED", 2**10)
+    pipeline = masknmf.TwoPhotonCalciumPipeline(output_folder=str(tmp_path), device="cpu")
+    path = pipeline.run(cells_movie(), frame_rate=30) / "results.hdf5"
+    curated = masknmf.demixing.write_curated(str(path), masknmf.DemixingResults.from_hdf5(path))
+    for filepath in (path, curated):
+        with h5py.File(filepath, "r") as file:
+            compression, demixing = file[masknmf.CompressionArray.__name__], file[masknmf.DemixingResults.__name__]
+            for name in ("temporal_compressed", "spatial_compressed/indices", "spatial_compressed/values"):
+                assert demixing[name] == compression[name], f"{filepath}: {name} is stored twice"
+    close_log(pipeline)
+
+
 def test_a_run_that_breaks_from_python_records_that_it_failed_and_why(tmp_path):
     pipeline = BrokenPipeline(output_folder=str(tmp_path))
     with pytest.raises(RuntimeError):

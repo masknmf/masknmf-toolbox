@@ -105,6 +105,12 @@ def write_curated(
         the path written
     """
     out = os.path.join(os.path.dirname(str(path)), f"{results_stem(path)}.{get_timestamp()}{CURATED_SUFFIX}")
+    # NOTE: the copied groups go in before the export, so the export links the arrays it shares with them (the
+    # compression) instead of storing them a second time
+    with h5py.File(path, "r") as source, h5py.File(out, "w") as f:
+        for name in source:
+            if name != DemixingResults.__name__:
+                source.copy(source[name], f, name=name)
     results.export(out)
     by_filter = "; ".join(
         f"{flt['column']} {'outside' if flt['outside'] else 'inside'} {flt['range'][0]:g} to {flt['range'][1]:g}: "
@@ -112,10 +118,7 @@ def write_curated(
         for flt in filters
         if flt["signals"]
     )
-    with h5py.File(path, "r") as source, h5py.File(out, "a") as f:
-        for name in source:
-            if name not in f:
-                source.copy(source[name], f, name=name)
+    with h5py.File(out, "a") as f:
         f.attrs["description"] = (
             f"Demixing results after curation: {len(drop)} signal(s) removed"
             + (f" ({by_filter})" if by_filter else "")
