@@ -123,11 +123,15 @@ class SingleSessionDemixingVis:
     what was done, and the viewer moves on to it so further passes chain.
 
     The "Signals" tab lists every demixed signal; ctrl / shift select a group whose traces share the plot.
+    "Merge" (g) marks the group to merge: its signals draw as one mask and one contour, the pixels any of them
+    fills, and a click on it or on one of their table rows selects them all; again unmarks. The mark is visual
+    only: the signals, their traces and table rows stay, Demix does not merge them, and ``merge_groups`` lists
+    the groups.
     Traces plot only with the Curation tab's "show selected traces" on (off by default): selecting then only
     highlights, however big the selection.
     Clicking the selected mask or its table row again deselects it; a pan or drag on a panel leaves the
     selection alone, and a double-click on a trace or shift panel only refits its axes. Esc deselects everything, ctrl+a groups every signal the table shows, and
-    ctrl+z undoes the last mark, drawn roi, pixel average or deselect (a Demix empties the undo stack; roi
+    ctrl+z undoes the last mark, merge, drawn roi, pixel average or deselect (a Demix empties the undo stack; roi
     vertex drags are not undone). Left / right step the movie a frame (shift: 10); m and c toggle the masks and
     contours, r arms a new roi. Every key is listed by the keybinds button at the top of both tabs (k) and the
     help button beside it (h) opens the curation help page. The Overlay section shows masks and contours in two pairs, each a checkbox
@@ -554,12 +558,7 @@ class SingleSessionDemixingVis:
         if first:
             self._traces.link(self.reference_index)
 
-        if self._contours is not None:
-            for name in self._panels:
-                self._contours.remove_from(self._ndw_fov.figure[name])
-        self._contours = None
-        if self._has_ac:
-            self._make_contours()
+        self._make_contours()
 
         self._bind_click_handlers()
         if self._has_ac and len(self._footprints):
@@ -768,7 +767,13 @@ class SingleSessionDemixingVis:
             g.graphic.cmap = "gray"
 
     def _make_contours(self):
-        """Draw the current footprints' contours on every panel."""
+        """Draw the current footprints' contours on every panel, in place of the ones drawn before; no footprints, none."""
+        if self._contours is not None:
+            for name in self._panels:
+                self._contours.remove_from(self._ndw_fov.figure[name])
+        self._contours = None
+        if self._footprints is None:
+            return
         self._contours = FootprintContours(self._footprints.outlines)
         for name in self._panels:
             self._contours.add_to(self._ndw_fov.figure[name])
@@ -946,6 +951,8 @@ class SingleSessionDemixingVis:
         self._active_roi = None
         self._active_pixel = None
         self._active_component = int(component)
+        # a signal marked to merge is selected with its group
+        self._group += [k for group in self.merge_groups if component in group for k in group if k not in self._group]
         if self._order is not None:
             if self._order.reveal(self._active_component):
                 self._status = "area filter widened to show the selection"
@@ -1418,11 +1425,51 @@ class SingleSessionDemixingVis:
         self._order.rebuild()
         self._sync_highlight()
 
+    @property
+    def merge_groups(self) -> list:
+        """The groups of signals marked to merge, each a sorted list of signal indices."""
+        return [] if self._footprints is None else [list(group) for group in self._footprints.merges]
+
+    def mark_merges(self, groups, record: bool = True):
+        """
+        Mark ``groups`` of signals to merge, in place of the groups marked before: each draws as one mask and one
+        contour. The signals keep their traces and table rows, and Demix does not merge them yet.
+
+        Args:
+            groups: groups of signal indices, two or more in each and none in two groups
+            record (bool): keep the state before for ctrl+z
+        """
+        if record:
+            self._snapshot()
+        self._footprints.merge(groups)
+        self._make_contours()
+        self._refresh_masks()
+
+    def _merged_together(self, signals) -> bool:
+        """True if ``signals``, one or more, all belong to one group marked to merge."""
+        signals = set(signals)
+        return bool(signals) and any(signals <= set(group) for group in self.merge_groups)
+
+    def _merge_selected(self):
+        """
+        The Merge action: mark the selected signals to merge, together with every marked group one of them is in;
+        a selection inside one marked group unmarks that group.
+        """
+        signals = {k for k in self._group if isinstance(k, int)} or {self._active_component}
+        groups = self.merge_groups
+        touched = [group for group in groups if signals & set(group)]
+        apart = [group for group in groups if group not in touched]
+        if self._merged_together(signals):
+            self.mark_merges(apart)
+        elif len(signals) > 1:
+            self.mark_merges([*apart, signals.union(*touched)])
+
     def _snapshot(self):
-        """Push the curation state for ctrl+z: the marks, drawn rois, pixel averages and selection."""
+        """Push the curation state for ctrl+z: the marks, merge groups, drawn rois, pixel averages and selection."""
         self._undo.append(
             {
                 "marked": set(self._marked),
+                "merges": self.merge_groups,
                 "rois": [
                     (sel, roi["panel"], roi["color"], np.array(sel.selection), roi["trace"], roi["area"])
                     for sel, roi in self._rois.items()
@@ -1476,6 +1523,8 @@ class SingleSessionDemixingVis:
         self._rois.update(rois)
         self._marked.clear()
         self._marked.update(state["marked"])
+        if state["merges"] != self.merge_groups:
+            self.mark_merges(state["merges"], record=False)
         self._filter_select = state["filter_select"]
         self._filter_side = set(state["filter_side"])
         self._region_outside = state["region_outside"]
@@ -1590,6 +1639,8 @@ class SingleSessionDemixingVis:
             return
         if pressed(DEMIXING["delete"]) and self._worker is None:
             self._delete_selected()
+        if pressed(DEMIXING["merge"]) and self._order is not None:
+            self._merge_selected()
         if pressed(DEMIXING["escape"]):
             if self._help_open or self._keybinds_open or self._options_open or self._record_open:
                 self._help_open = self._keybinds_open = self._options_open = self._record_open = False
@@ -1648,8 +1699,9 @@ class SingleSessionDemixingVis:
         if len(self._group) > 1 or pixels or rois:
             signals = sorted(k for k in self._group if isinstance(k, int))
             shown = f"{len(signals)} signals" if len(signals) > 12 else f"signals {signals}"
+            merged = " (marked to merge)" if self._merged_together(signals) else ""
             note = "; pixel avgs are marked, delete them when done" if pixels else ""
-            return f"{len(self._group)} grouped: {shown}, rois {rois}, pixel avgs {pixels}{note}"
+            return f"{len(self._group)} grouped: {shown}{merged}, rois {rois}, pixel avgs {pixels}{note}"
         if self._active_component is not None:
             marked = (
                 " (marked for deletion)"
@@ -2123,10 +2175,19 @@ class SingleSessionDemixingVis:
             f"until then; a selected drawn roi or pixel average is dropped right away ({key})"
         )
         imgui.same_line(0, gap)
-        imgui.begin_disabled(True)
-        imgui.button(f"{fa.ICON_FA_OBJECT_GROUP}##merge", size)
+        unmerge = self._merged_together(signals)
+        imgui.begin_disabled(len(signals) < 2 and not unmerge)
+        with button_colors(THEME.accent, THEME.accent, (0.05, 0.05, 0.05), on=unmerge):
+            if imgui.button(f"{fa.ICON_FA_OBJECT_GROUP}##merge", size):
+                self._merge_selected()
         imgui.end_disabled()
-        tooltip("Merge: the grouped signals into one, not yet implemented")
+        key = DEMIXING["merge"].label
+        tooltip(
+            f"Unmerge: the {len(signals)} selected signal(s) draw as separate masks again ({key})"
+            if unmerge
+            else f"Merge: mark the {len(signals)} selected signal(s) to merge, drawn as one mask and one contour; "
+            f"it takes two or more, and Demix does not merge them yet ({key})"
+        )
         imgui.same_line(0, gap)
         imgui.begin_disabled(not self._rois)
         if imgui.button(f"{fa.ICON_FA_FILE_EXPORT}##export", size):
