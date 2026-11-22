@@ -56,7 +56,7 @@ from masknmf.visualization.imgui.run_record import RECORD_LABEL, RECORD_TIP, dra
 from masknmf.visualization.imgui.scale import scale_figure
 from masknmf.visualization.rois import MARKED_COLOR, SELECTED_ALPHA, FootprintSet
 from masknmf.visualization.summary_widget import SummaryImageViewer
-from masknmf.visualization.contrast import CONTRAST_METHODS, VMAX_FIXED, VMIN_FIXED
+from masknmf.visualization.contrast import CONTRAST_BY_MOVIE, CONTRAST_METHODS, VMAX_FIXED, VMIN_FIXED, histogram_on_show
 from masknmf.demixing import CellStats, estimate_temporal_demixed_raw, update_signals, write_curated
 from masknmf.diagnostics import pmd_autocovariance_diagnostics
 from masknmf.pipelines.configs.demixing_configs import NMFConfig
@@ -170,7 +170,9 @@ class SingleSessionDemixingVis:
     ``panel_names`` maps any of those names to the one shown in its place (panel title, Panels matrix,
     right-click menu). ``canvas`` is the rendercanvas the figure draws on; None opens a window. ``contrast`` names
     how each panel fits its color limits, a key of :data:`masknmf.visualization.contrast.CONTRAST_METHODS`; the
-    default, fixed, opens every panel at vmin -0.05, vmax 1.0 without reading the movie.
+    default, fixed, opens every panel at vmin -0.05, vmax 1.0 without reading the movie. The background always
+    takes the median, over 16 frames spread across the movie, of each frame's 0.1 and 99.9 percentiles. A colorbar
+    at each panel's right edge drags its limits.
 
     The Signals table always carries the results' own stats (:meth:`CellStats.from_results`: mean, std, snr
     and skew of each demixed trace; fit, resid and bkgd from the roi averages the results hold), hidden until
@@ -480,12 +482,13 @@ class SingleSessionDemixingVis:
             )
             self._reference_index = self._ndw_fov.indices
             self._panel_graphics = OrderedDict()
+            self._colorbars = {}
             for name, array in self._panels.items():
                 self._panel_graphics[name] = self._ndw_fov[name].add_nd_image(
                     array, ["time", "m", "n"], ["m", "n"], slider_maps={"time": frame_timings}, compute_histogram=False,
                     graphic_kwargs={"vmin": VMIN_FIXED, "vmax": VMAX_FIXED}, name=name,
                 )
-                self._fit_contrast(self._panel_graphics[name])
+                self._fit_panel(name)
                 self._ndw_fov.figure[name].title = array.current
             self._fov_subplot = self._ndw_fov.figure[next(iter(self._panels))]
             self._ndw_fov.figure.set_imgui_right_click(SourceRightClickMenu(self._panel_choices, self._set_source))
@@ -502,7 +505,7 @@ class SingleSessionDemixingVis:
                 self._panels[name] = SwitchableArray(sources, self._shape)
                 self._panels[name].current = keep if same else order[min(i, len(order) - 1)]
                 self._panel_graphics[name].data = self._panels[name]
-                self._fit_contrast(self._panel_graphics[name])
+                self._fit_panel(name)
                 if frames_changed:
                     self._panel_graphics[name].slider_maps = {"time": frame_timings}
                 self._ndw_fov.figure[name].title = self._panels[name].current
@@ -668,7 +671,26 @@ class SingleSessionDemixingVis:
         run_sync(graphic._set_indices_())
         if graphic.compute_histogram:
             graphic.slicer._recompute_histogram()
-        self._fit_contrast(graphic)
+        self._fit_panel(panel)
+
+    def _fit_panel(self, panel: str):
+        """
+        Fit ``panel``'s color limits by its movie's method in CONTRAST_BY_MOVIE, else the viewer's contrast method. When
+        fastplotlib docks no colorbar, dock one over a histogram of the frame on show, so the limits can be dragged.
+        """
+        graphic = self._panel_graphics[panel]
+        CONTRAST_BY_MOVIE.get(self._panels[panel].current, self._fit_contrast)(graphic)
+        if graphic.compute_histogram:
+            # fastplotlib's colorbar took the right edge
+            self._colorbars.pop(panel, None)
+            return
+        if panel in self._colorbars:
+            # NOTE: NDImage.data= replaces the graphic, so the colorbar is rebound on every fit
+            self._colorbars[panel].graphics = graphic.graphic
+            self._colorbars[panel].histogram = histogram_on_show(graphic.graphic)
+        else:
+            self._colorbars[panel] = fpl.ui.ImguiColorbar(graphics=graphic.graphic, histogram=histogram_on_show(graphic.graphic))
+            self._ndw_fov.figure[panel].add_imgui_window(self._colorbars[panel], location="right", size=100)
 
     def _bind_click_handlers(self):
         """Re-attach the click handlers to every video panel: NDGraphic.data= replaces the graphic instance."""
