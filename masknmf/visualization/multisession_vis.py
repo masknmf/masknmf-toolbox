@@ -42,6 +42,7 @@ from masknmf.visualization.imgui.keybinds import MULTISESSION, pressed
 from masknmf.visualization.imgui.options import draw_options_menu, draw_options_popup
 from masknmf.visualization.imgui.panels import KEYBINDS_LABEL, hint_button_width
 from masknmf.visualization.imgui.scale import scale_figure
+from masknmf.visualization.rois import FootprintContours, FootprintSet
 from masknmf.visualization.summary_widget import SummaryImageViewer
 
 _UNCLUSTERED_COLOR = (0.45, 0.45, 0.45)
@@ -286,7 +287,7 @@ class MultiSessionDemixingVis:
                                  controller_ids=[tuple(self._panel_names)],
                                  size=(1500, 1000))
 
-        # one selector per session, holding the graphics of whichever panels show that session
+        # one set of contours per session, drawn on whichever panels show that session
         self._show_contours = False
         self._press = None  # screen position of the last pointer press on a panel
         self._same_spot = False  # that press landed where the one before it did
@@ -294,16 +295,13 @@ class MultiSessionDemixingVis:
         self._show_selected_contours = True
         self._selected_contour_opacity = 0.7
         self._masks_shown = np.ones(self.num_sessions_displayed, dtype=bool)
-        self._image_highlight_selectors = []
-        for j in range(self.num_sessions_displayed):
-            selector = fpl.ImageHighlightSelector(lut="tab10",
-                                                  lut_wrap="repeat",
-                                                  selection_options={"pixels": self.ac_arrays[j].contours},
-                                                  options_color="w",
-                                                  options_alpha=0.0,
-                                                  alpha=self._selected_contour_opacity)
-            selector.selection = None
-            self._image_highlight_selectors.append(selector)
+        self._active = None
+        self._contours = [
+            FootprintContours(FootprintSet.from_sparse(array.spatial_demixed, array.shape[1:]).outlines())
+            for array in self.ac_arrays
+        ]
+        self._style_contours()
+        self._color_contours()
 
         self._nd_image_graphics = []
         self._signal_clims = {}
@@ -354,7 +352,6 @@ class MultiSessionDemixingVis:
         })
         self._order = RoiOrder(columns, len(self.cluster_ids))
         self._order.rebuild()
-        self._active = None
         self._follow = False
         self._scroll_to_current = False
         self._keybinds_open = False
@@ -390,7 +387,7 @@ class MultiSessionDemixingVis:
     def _bind_panel(self, k: int):
         """Hook panel k's graphic to its session: that session's contours and double-click selection, then its title and color limits."""
         graphic = self._nd_image_graphics[k].graphic
-        self._image_highlight_selectors[self._panel_session[k]].add_graphic(graphic)
+        self._contours[self._panel_session[k]].add_to(self._ndw.figure[self._panel_names[k]])
         graphic.add_event_handler(self._pointer_down, "pointer_down")
         graphic.add_event_handler(partial(self.neuron_selection, k), "double_click")
         self._set_title(k)
@@ -405,7 +402,7 @@ class MultiSessionDemixingVis:
             return
         name = self._panel_names[k]
         nd_image = self._nd_image_graphics[k]
-        self._image_highlight_selectors[self._panel_session[k]].remove_graphic(nd_image.graphic)
+        self._contours[self._panel_session[k]].remove_from(self._ndw.figure[name])
         self._panels[name] = self._session_array(j)
         self._panel_session[k] = j
         timings = self.session_frame_timings[j]
@@ -415,11 +412,8 @@ class MultiSessionDemixingVis:
         self._refresh_panel(k)
         # a session moved into a panel shows its contours as Display sets them, whatever its masks box said before
         self._masks_shown[j] = True
-        selector = self._image_highlight_selectors[j]
-        selector.add_graphic(nd_image.graphic)
-        # a selector with no panel skips its redraw, so the opacities and the selection are written now
-        selector.options_alpha = self._contour_opacity if self._show_contours else 0.0
-        selector.alpha = self._selected_contour_opacity if self._show_selected_contours else 0.0
+        self._contours[j].add_to(self._ndw.figure[name])
+        self._style_contours()
         self._set_title(k)
 
     def _on_screen(self) -> list[int]:
@@ -608,6 +602,7 @@ class MultiSessionDemixingVis:
         """Color every session's ROIs by their cluster row, mask the rest (gray when shown), and remake the MIPs."""
         self._current_colors = self._row_colors()
         self._mips = []
+        self._roi_colors = []  # per session, (rois, 3) rgb of every ROI in the signals movie
         for j in range(self.num_sessions_displayed):
             rows = self._rows_by_session[j]
             tracked = rows >= 0
@@ -615,6 +610,7 @@ class MultiSessionDemixingVis:
             self.ac_arrays[j].mask = torch.from_numpy(tracked)
             colors = np.tile(np.asarray(_UNCLUSTERED_COLOR, np.float32), (len(rows), 1))
             colors[tracked] = self._current_colors[rows[tracked]]
+            self._roi_colors.append(colors)
             colorful.colors = torch.from_numpy(colors).float()
             colorful.mask = torch.from_numpy(tracked)
             mip = colorful.compute_mip().cpu().numpy()
@@ -631,6 +627,7 @@ class MultiSessionDemixingVis:
             for k in range(len(self._panel_names)):
                 self._refresh_panel(k)
             self._refresh_stills()
+            self._color_contours()
 
     def _pointer_down(self, ev):
         # pygfx reports any two quick presses on one panel as a double-click, however far apart
@@ -661,9 +658,7 @@ class MultiSessionDemixingVis:
     def select_cluster(self, row: int | None):
         """Highlight displayed cluster ``row`` (an index into cluster_ids) in every session, or clear with None."""
         self._active = row
-        for j, selector in enumerate(self._image_highlight_selectors):
-            local = -1 if row is None else int(self._first_member[row, j])
-            selector.selection = None if local < 0 else local
+        self._color_contours()
         self._update_traces()
         self._box_selection()
         if row is not None and self._follow:
@@ -746,13 +741,25 @@ class MultiSessionDemixingVis:
     def _set_contours(self, show: bool):
         """``show`` draws every other footprint's contour at the contour opacity; the selection's has its own pair."""
         self._show_contours = show
-        for j, selector in enumerate(self._image_highlight_selectors):
-            selector.options_alpha = self._contour_opacity if show and self._masks_shown[j] else 0.0
+        self._style_contours()
 
     def _set_selected_contours(self, show: bool):
         self._show_selected_contours = show
-        for j, selector in enumerate(self._image_highlight_selectors):
-            selector.alpha = self._selected_contour_opacity if show and self._masks_shown[j] else 0.0
+        self._style_contours()
+
+    def _color_contours(self):
+        """Every contour takes its ROI's color in the signals movie; the selected cluster's is highlighted in every session."""
+        for j, contours in enumerate(self._contours):
+            local = -1 if self._active is None else int(self._first_member[self._active, j])
+            contours.set_colors(self._roi_colors[j], [] if local < 0 else [local])
+
+    def _style_contours(self):
+        """Put Display's contour boxes and opacities on the lines of every session whose masks box is on."""
+        for contours, shown in zip(self._contours, self._masks_shown):
+            contours.set_opacity(
+                self._contour_opacity if self._show_contours and shown else 0.0,
+                self._selected_contour_opacity if self._show_selected_contours and shown else 0.0,
+            )
 
     def _step(self, delta: int):
         if self._active is None:
@@ -877,7 +884,7 @@ class MultiSessionDemixingVis:
         changed, self._contour_opacity = imgui.slider_float("##contour-opacity", self._contour_opacity, 0.05, 1.0, "%.2f")
         if changed and self._show_contours:
             self._set_contours(True)
-        help_mark("every other footprint's contour at this opacity (c)")
+        help_mark("every other footprint's contour, in its ROI's color at this opacity (c)")
         changed, show = imgui.checkbox("sel contours", self._show_selected_contours)
         if changed:
             self._set_selected_contours(show)

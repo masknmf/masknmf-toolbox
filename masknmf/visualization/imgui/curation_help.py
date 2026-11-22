@@ -174,7 +174,7 @@ PIXEL_LINE = (("slow", 5, GROUP[2]),)
 OVERLAY = (
     ("control", "description"),
     ("masks (m)", "every footprint feathered by its weights; sel masks: the selection at its own peak, white rim"),
-    ("contours (c)", "every footprint's outline; sel contours: the selection's, in its mask color"),
+    ("contours (c)", "every footprint's outline, in its mask color; sel contours: the selection's, wider"),
     ("color by", "masks and table ids by a column's rank instead of signal id"),
     ("center (t)", "keep the current frame centered in the traces"),
     ("pixel traces (p)", "an empty pixel's 5x5 compressed average on click"),
