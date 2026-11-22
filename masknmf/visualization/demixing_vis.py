@@ -769,7 +769,7 @@ class SingleSessionDemixingVis:
 
     def _make_contours(self):
         """Draw the current footprints' contours on every panel."""
-        self._contours = FootprintContours(self._footprints.outlines())
+        self._contours = FootprintContours(self._footprints.outlines)
         for name in self._panels:
             self._contours.add_to(self._ndw_fov.figure[name])
         self._style_contours()

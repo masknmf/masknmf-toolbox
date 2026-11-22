@@ -138,7 +138,7 @@ def test_mask_and_contour_draw_the_same_pixels():
     footprints = FootprintSet([footprint(core)])
     drawn = footprints.rgba(core.shape, opacity=1.0, by_peak=False)[..., 3] > 0
     assert drawn.sum() == 7 * 6
-    np.testing.assert_array_equal(footprints.outlines()[0], outline(*np.nonzero(drawn)))
+    np.testing.assert_array_equal(footprints.outlines[0], outline(*np.nonzero(drawn)))
 
 
 def test_marked_and_grouped_footprints_take_those_colors():
@@ -154,7 +154,7 @@ def test_overlapping_footprints_each_keep_a_contour_and_the_highlighted_ones_are
     square[4:12, 4:12] = True
     footprints = FootprintSet([footprint(square), footprint(square), footprint(np.roll(square, 3, axis=1))])
     colors = np.array(COLORS)
-    contours = FootprintContours(footprints.outlines())
+    contours = FootprintContours(footprints.outlines)
     contours.add_to(figure[0, 0])
     contours.set_opacity(1.0, 1.0)
 
@@ -195,7 +195,7 @@ def test_highlighted_footprint_is_left_out_of_the_lower_line(panel):
     figure, _image, blank = panel
     square = np.zeros(SHAPE, bool)
     square[4:12, 4:12] = True
-    contours = FootprintContours(FootprintSet([footprint(square)]).outlines())
+    contours = FootprintContours(FootprintSet([footprint(square)]).outlines)
     contours.add_to(figure[0, 0])
     contours.set_colors(np.array([BLUE]), highlighted=[0])
     contours.set_opacity(1.0, 0.5)
@@ -208,7 +208,7 @@ def test_highlighted_footprint_is_left_out_of_the_lower_line(panel):
 def test_results_without_footprints_draw_nothing(panel):
     figure, _image, blank = panel
     footprints = FootprintSet([])
-    contours = FootprintContours(footprints.outlines())
+    contours = FootprintContours(footprints.outlines)
     contours.add_to(figure[0, 0])
     contours.set_opacity(1.0, 1.0)
     contours.set_colors(footprints.mask_colors())

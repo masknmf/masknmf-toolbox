@@ -237,8 +237,9 @@ class FootprintSet:
         """The ``support`` of every footprint, in footprint order. Computed once, from the footprints as they are then."""
         return [support(*footprint) for footprint in self.footprints]
 
+    @functools.cached_property
     def outlines(self) -> list:
-        """The ``outline`` of every footprint's support, in footprint order."""
+        """The ``outline`` of every footprint's support, in footprint order. Computed once, like the supports."""
         return [outline(ypix, xpix) for ypix, xpix, _lam in self.supports]
 
     def mask_colors(self, marked: Iterable[int] = (), grouped: Optional[Mapping[int, Tuple[float, float, float]]] = None) -> np.ndarray:

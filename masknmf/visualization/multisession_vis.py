@@ -297,7 +297,7 @@ class MultiSessionDemixingVis:
         self._masks_shown = np.ones(self.num_sessions_displayed, dtype=bool)
         self._active = None
         self._contours = [
-            FootprintContours(FootprintSet.from_sparse(array.spatial_demixed, array.shape[1:]).outlines())
+            FootprintContours(FootprintSet.from_sparse(array.spatial_demixed, array.shape[1:]).outlines)
             for array in self.ac_arrays
         ]
         self._style_contours()
