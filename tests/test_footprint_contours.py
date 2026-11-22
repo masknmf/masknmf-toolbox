@@ -141,6 +141,15 @@ def test_mask_and_contour_draw_the_same_pixels():
     np.testing.assert_array_equal(footprints.outlines[0], outline(*np.nonzero(drawn)))
 
 
+def test_a_pixel_belongs_to_the_lowest_footprint_whose_mask_fills_it():
+    core = np.zeros((12, 12), bool)
+    core[3:10:2, 3:9] = True
+    footprints = FootprintSet([footprint(np.eye(12, dtype=bool)), footprint(core), footprint(core)])
+    assert footprints.at(4, 6) == 1  # a row the closing filled
+    assert footprints.at(5, 5) == 0
+    assert footprints.at(0, 11) is None
+
+
 def test_marked_and_grouped_footprints_take_those_colors():
     footprints = FootprintSet([footprint(np.eye(4, dtype=bool))] * 3, colors=np.array([RED, RED, RED]))
     colors = footprints.mask_colors(marked=[1, 2], grouped={0: BLUE, 1: BLUE})

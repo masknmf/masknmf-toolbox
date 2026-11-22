@@ -242,6 +242,11 @@ class FootprintSet:
         """The ``outline`` of every footprint's support, in footprint order. Computed once, like the supports."""
         return [outline(ypix, xpix) for ypix, xpix, _lam in self.supports]
 
+    def at(self, row: int, col: int) -> Optional[int]:
+        """The lowest footprint that draws pixel (row, col), or None."""
+        drawing = (k for k, (ypix, xpix, _lam) in enumerate(self.supports) if ((ypix == row) & (xpix == col)).any())
+        return next(drawing, None)
+
     def mask_colors(self, marked: Iterable[int] = (), grouped: Optional[Mapping[int, Tuple[float, float, float]]] = None) -> np.ndarray:
         """(footprints, 3) color of every mask and its contour: MARKED_COLOR if ``marked``, else its ``grouped`` color, else its own."""
         colors = np.array([self.color(k) for k in range(len(self))], np.float32).reshape(-1, 3)

@@ -873,6 +873,9 @@ class SingleSessionDemixingVis:
             component = component_at_pixel(
                 self._ac_array.spatial_demixed, self._ac_array.centers, self._shape[1:], (col, row)
             )
+            if component is None:
+                # a pixel in no footprint that a mask fills all the same, between its footprint's own
+                component = self._footprints.at(row, col)
             if component is not None:
                 if mods & {"Control", "Ctrl"}:
                     self.group_toggle(component)
