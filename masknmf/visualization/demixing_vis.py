@@ -39,6 +39,7 @@ from masknmf.visualization.imgui import (
     em,
     popup,
     opaque_popups,
+    frame_slider_map,
     resolve_time_reference,
     section,
     to_vec4,
@@ -173,6 +174,8 @@ class SingleSessionDemixingVis:
     default, fixed, opens every panel at vmin -0.05, vmax 1.0 without reading the movie. The background always
     takes the median, over 16 frames spread across the movie, of each frame's 0.1 and 99.9 percentiles. A colorbar
     at each panel's right edge drags its limits.
+    The time slider runs in ``frame_timings``' unit, ``time_unit`` (shown on the traces' time axis), and each panel
+    shows the frame nearest it; without ``frame_timings`` it runs over frame numbers.
 
     The Signals table always carries the results' own stats (:meth:`CellStats.from_results`: mean, std, snr
     and skew of each demixed trace; fit, resid and bkgd from the roi averages the results hold), hidden until
@@ -217,10 +220,12 @@ class SingleSessionDemixingVis:
         panel_names: dict[str, str] | None = None,
         canvas=None,
         contrast: str = "fixed",
+        time_unit: str | None = None,
     ):
         if contrast not in CONTRAST_METHODS:
             raise ValueError(f"contrast is {contrast!r}; choose from {', '.join(CONTRAST_METHODS)}")
         self._fit_contrast = CONTRAST_METHODS[contrast]
+        self._time_unit = time_unit
         self._canvas = canvas
         self._results_path = None if results_path is None else str(results_path)
         self._nmf_config_given = nmf_config is not None
@@ -485,7 +490,8 @@ class SingleSessionDemixingVis:
             self._colorbars = {}
             for name, array in self._panels.items():
                 self._panel_graphics[name] = self._ndw_fov[name].add_nd_image(
-                    array, ["time", "m", "n"], ["m", "n"], slider_maps={"time": frame_timings}, compute_histogram=False,
+                    array, ["time", "m", "n"], ["m", "n"], slider_maps={"time": frame_slider_map(frame_timings)},
+                    compute_histogram=False,
                     graphic_kwargs={"vmin": VMIN_FIXED, "vmax": VMAX_FIXED}, name=name,
                 )
                 self._fit_panel(name)
@@ -507,7 +513,7 @@ class SingleSessionDemixingVis:
                 self._panel_graphics[name].data = self._panels[name]
                 self._fit_panel(name)
                 if frames_changed:
-                    self._panel_graphics[name].slider_maps = {"time": frame_timings}
+                    self._panel_graphics[name].slider_maps = {"time": frame_slider_map(frame_timings)}
                 self._ndw_fov.figure[name].title = self._panels[name].current
         self._movie_names = set(movies)
         if not first and self._summary.is_open:
@@ -538,7 +544,7 @@ class SingleSessionDemixingVis:
         # no autofit: the zoom set on one signal's traces is kept while selecting others
         panels = (*(("shift (px)",) if self._shift_lines else ()), *(("traces",) if self._pmd_array is not None or self._has_ac else ()))
         if first:
-            self._traces = TracePlot(panels, self._shape[0], frame_timings, autofit=False)
+            self._traces = TracePlot(panels, self._shape[0], frame_timings, autofit=False, time_unit=self._time_unit)
             self._traces.dock(self._ndw_fov.figure, size=440 if self._shift_lines else 320, menu=self._draw_file_menu)
         else:
             self._traces.reset(panels, self._shape[0], frame_timings)

@@ -69,6 +69,9 @@ GLOB_TRACKING_MANIFEST = "*_roicat-tracking-manifest.json"
 NAMES_ALIAS = {"frame_rate": "--fs"}
 
 PORT_SERVE = 8810
+# units per second of each unit a viewer's time slider can run in, and the one the viewers use
+TIME_UNITS = {"s": 1.0, "ms": 1e3}
+TIME_UNIT = "s"
 
 CHARACTERS_NEEDING_QUOTES = set(" \t\\'&|;<>()$`!*?[]{}~#")
 
@@ -924,6 +927,7 @@ def open_demixing_viewer(
     viewer = masknmf.SingleSessionDemixingVis(
         demixing_results=results,
         frame_timings=timings(results.shape[0], frame_rate),
+        time_unit=None if frame_rate is None else TIME_UNIT,
         device=device,
         results_path=filepath_results,
         raw=raw,
@@ -1130,11 +1134,11 @@ def command_track(args: argparse.Namespace) -> None:
     print_tracking(tracking=tracking, folder=str(folder))
 
 
-def timings(num_frames: int, frame_rate: Optional[float]):
-    """Frame times in seconds, or None when no acquisition rate was given."""
+def timings(num_frames: int, frame_rate: Optional[float], unit: str = TIME_UNIT):
+    """Frame times in ``unit``, a key of ``TIME_UNITS``, or None when no acquisition rate was given."""
     if frame_rate is None:
         return None
-    return np.arange(num_frames) / float(frame_rate)
+    return np.arange(num_frames) / float(frame_rate) * TIME_UNITS[unit]
 
 
 def build_parser(spec: Optional[scraper.PipelineSpec], command: Optional[str] = None) -> argparse.ArgumentParser:

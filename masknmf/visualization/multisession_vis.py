@@ -31,6 +31,7 @@ from masknmf.visualization.imgui import (
     draw_panels_popup,
     draw_roi_table,
     em,
+    frame_slider_map,
     grid,
     help_mark,
     opaque_popups,
@@ -317,7 +318,7 @@ class MultiSessionDemixingVis:
                 ("m", "n", "c"),
                 rgb_dim="c",
                 compute_histogram=False,
-                slider_maps=None if timings is None else {self.reference_range_timeaxis: timings},
+                slider_maps=None if timings is None else {self.reference_range_timeaxis: frame_slider_map(timings)},
                 name=name,
             )
             self._nd_image_graphics.append(graphic)
@@ -408,7 +409,7 @@ class MultiSessionDemixingVis:
         self._panels[name] = self._session_array(j)
         self._panel_session[k] = j
         timings = self.session_frame_timings[j]
-        nd_image.slicer.slider_maps = None if timings is None else {self.reference_range_timeaxis: timings}
+        nd_image.slicer.slider_maps = None if timings is None else {self.reference_range_timeaxis: frame_slider_map(timings)}
         # the panel keeps its graphic, so its zoom and click handlers stay: only the array under it changes
         nd_image.slicer.data = self._panels[name]
         self._refresh_panel(k)
