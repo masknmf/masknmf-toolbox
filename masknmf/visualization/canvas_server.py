@@ -50,7 +50,7 @@ _PAGE = Template("""<!DOCTYPE html>
     <meta charset='utf-8'>
     <title>$title</title>
     <script type='module' src='renderview.js'></script>
-    <script type='module' src='renderview-client.js'></script>
+    $client
     <link rel='stylesheet' href='renderview.css'>
     <style>
         html, body { margin: 0; height: 100%; overflow: auto; background: #1e1f22; color: #ddd;
@@ -63,7 +63,7 @@ _PAGE = Template("""<!DOCTYPE html>
                  background: rgba(0, 0, 0, 0.45); border-radius: 4px; text-decoration: none; }
         #status { right: 8px; }
         #fit { right: 8px; bottom: 30px; cursor: pointer; }
-        #home { left: 8px; }
+        #home { top: 4px; right: 8px; bottom: auto; }
         .badge button { font: inherit; margin-left: 6px; }
     </style>
 </head>
@@ -85,24 +85,62 @@ _PAGE = Template("""<!DOCTYPE html>
         // a browser window resized afterwards takes the canvas with it again
         window.addEventListener('resize', fitWindow);
     </script>
+    $wait
 </body>
 </html>
 """)
 
+# polls a status url while a process behind a proxy still opens its file, and connects once it listens
+_WAIT = Template("""<script>
+        async function waitForViewer () {
+            const waiting = document.querySelector('#canvas p')
+            const text = waiting.textContent
+            const start = Date.now()
+            while (true) {
+                const state = await (await fetch('$url', { cache: 'no-store' })).json()
+                if (state.status === 'ready') {
+                    const client = document.createElement('script')
+                    client.type = 'module'
+                    client.src = 'renderview-client.js'
+                    document.head.append(client)
+                    return
+                }
+                if (state.status !== 'opening') {
+                    waiting.textContent = state.reason
+                    return
+                }
+                waiting.textContent = text + ' ' + Math.round((Date.now() - start) / 1000) + ' s'
+                await new Promise((resolve) => setTimeout(resolve, 500))
+            }
+        }
+        // a page restored from the back-forward cache has lost its websocket
+        window.addEventListener('pageshow', (event) => { if (event.persisted) { location.reload() } })
+        waitForViewer()
+    </script>""")
 
-def page_html(title: str, waiting: str, home: str | None = None, home_label: str = "sessions") -> str:
+
+def page_html(
+    title: str, waiting: str, home: str | None = None, home_label: str = "sessions", wait_url: str | None = None
+) -> str:
     """The page holding the canvas: full window, a fit badge, the connection status.
 
     ``waiting`` shows until the first frame arrives; ``home`` adds a badge
     named ``home_label`` linking back there (a session list, when a proxy serves several).
+    ``wait_url`` holds the client back until that url answers ``{"status": "ready"}``, counting
+    the seconds while it says ``opening`` and showing its ``reason`` on anything else.
     """
     link = (
         f"<a id='home' class='badge' href='{home}' >{html.escape(home_label)}</a>"
         if home
         else ""
     )
+    client = "<script type='module' src='renderview-client.js'></script>"
     return _PAGE.substitute(
-        title=html.escape(title), waiting=html.escape(waiting), home=link
+        title=html.escape(title),
+        waiting=html.escape(waiting),
+        home=link,
+        client="" if wait_url else client,
+        wait=_WAIT.substitute(url=html.escape(wait_url, quote=True)) if wait_url else "",
     )
 
 
