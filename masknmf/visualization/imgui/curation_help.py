@@ -150,7 +150,7 @@ TOOL_BUTTONS = (
     (fa.ICON_FA_SIGNATURE, "freehand", DIM),
     (fa.ICON_FA_PLUS, "add roi (r)", TEXT),
     (fa.ICON_FA_TRASH, "delete (d)", DROP),
-    (fa.ICON_FA_OBJECT_GROUP, "merge", DIM),
+    (fa.ICON_FA_OBJECT_GROUP, "merge (g)", TEXT),
     (fa.ICON_FA_LOCATION_CROSSHAIRS, "center (f)", ACCENT),
 )
 # the overlay sketch: the four cells and a speck of junk, each signal's strength against the strongest, in mask colors
@@ -174,7 +174,7 @@ PIXEL_LINE = (("slow", 5, GROUP[2]),)
 OVERLAY = (
     ("control", "description"),
     ("masks (m)", "every footprint feathered by its weights; sel masks: the selection at its own peak, white rim"),
-    ("contours (c)", "every footprint's outline; sel contours: the selection's, in its mask color"),
+    ("contours (c)", "every footprint's outline, in its mask color; sel contours: the selection's, wider"),
     ("color by", "masks and table ids by a column's rank instead of signal id"),
     ("center (t)", "keep the current frame centered in the traces"),
     ("pixel traces (p)", "an empty pixel's 5x5 compressed average on click"),
@@ -199,7 +199,11 @@ TOOLS = (
         "mark the selected signals for the next demix, again unmarks; a selected roi or pixel average is "
         "dropped right away",
     ),
-    ("merge", "the grouped signals into one, not yet implemented"),
+    (
+        "merge (g)",
+        "mark the grouped signals to merge: they draw as one mask and one contour, and a click on it selects them "
+        "all; again unmarks. Demix does not merge them yet",
+    ),
     ("center (f)", "every panel on the selected signal, following it as the selection moves"),
     (
         "in / out",

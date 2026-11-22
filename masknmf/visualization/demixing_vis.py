@@ -55,7 +55,7 @@ from masknmf.visualization.imgui.keybinds import DEMIXING, pressed
 from masknmf.visualization.imgui.options import OPTIONS_LABEL, draw_options_popup
 from masknmf.visualization.imgui.run_record import RECORD_LABEL, RECORD_TIP, draw_run_record_popup
 from masknmf.visualization.imgui.scale import scale_figure
-from masknmf.visualization.rois import MARKED_COLOR, SELECTED_ALPHA, FootprintSet
+from masknmf.visualization.rois import MARKED_COLOR, SELECTED_ALPHA, FootprintContours, FootprintSet
 from masknmf.visualization.summary_widget import SummaryImageViewer
 from masknmf.visualization.contrast import CONTRAST_BY_MOVIE, CONTRAST_METHODS, VMAX_FIXED, VMIN_FIXED, histogram_on_show
 from masknmf.demixing import CellStats, estimate_temporal_demixed_raw, update_signals, write_curated
@@ -112,7 +112,7 @@ class SingleSessionDemixingVis:
     Footprints show as feathered masks and/or contours over the summary image: a mask pixel's opacity is its
     weight times the signal's peak, against one maximum over the field, so a weak signal draws faint (the
     weighting switch scales every mask to its own peak instead), and the halo under a tenth of a footprint's
-    own peak is left out, as the contours leave it out.
+    own peak is left out. A contour is the smoothed outline of the pixels its mask fills, in the mask's color.
 
     With ``results_path`` set, "Demix" runs the drawn ROIs and the signals marked with "Delete" through the
     demixer's NMF pass (``nmf_config``; when None, the pipeline defaults with "filter dim rois" starting at the
@@ -123,11 +123,15 @@ class SingleSessionDemixingVis:
     what was done, and the viewer moves on to it so further passes chain.
 
     The "Signals" tab lists every demixed signal; ctrl / shift select a group whose traces share the plot.
+    "Merge" (g) marks the group to merge: its signals draw as one mask and one contour, the pixels any of them
+    fills, and a click on it or on one of their table rows selects them all; again unmarks. The mark is visual
+    only: the signals, their traces and table rows stay, Demix does not merge them, and ``merge_groups`` lists
+    the groups.
     Traces plot only with the Curation tab's "show selected traces" on (off by default): selecting then only
     highlights, however big the selection.
     Clicking the selected mask or its table row again deselects it; a pan or drag on a panel leaves the
     selection alone, and a double-click on a trace or shift panel only refits its axes. Esc deselects everything, ctrl+a groups every signal the table shows, and
-    ctrl+z undoes the last mark, drawn roi, pixel average or deselect (a Demix empties the undo stack; roi
+    ctrl+z undoes the last mark, merge, drawn roi, pixel average or deselect (a Demix empties the undo stack; roi
     vertex drags are not undone). Left / right step the movie a frame (shift: 10); m and c toggle the masks and
     contours, r arms a new roi. Every key is listed by the keybinds button at the top of both tabs (k) and the
     help button beside it (h) opens the curation help page. The Overlay section shows masks and contours in two pairs, each a checkbox
@@ -282,7 +286,7 @@ class SingleSessionDemixingVis:
         self._pixel_traces = False
         self._pixels = OrderedDict()
         self._active_pixel = None
-        self._image_selector = None
+        self._contours = None
         self._show_contours = show_contours
         self._contour_opacity = 0.9
         self._show_selected_contours = True
@@ -554,9 +558,7 @@ class SingleSessionDemixingVis:
         if first:
             self._traces.link(self.reference_index)
 
-        self._image_selector = None
-        if self._ac_array is not None:
-            self._make_selectors()
+        self._make_contours()
 
         self._bind_click_handlers()
         if self._has_ac and len(self._footprints):
@@ -764,22 +766,19 @@ class SingleSessionDemixingVis:
         for g in self._panel_graphics.values():
             g.graphic.cmap = "gray"
 
-    def _video_graphics(self):
-        """The NDImage wrapper for every video panel, in panel order."""
-        return tuple(self._panel_graphics.values())
-
-    def _make_selectors(self):
-        """(Re)build the footprint selectors over the current signals."""
-        show = self._show_contours
-        # the selected and grouped components' contours; the roi panel's "contours" adds every footprint's
-        self._image_selector = fpl.ImageHighlightSelector(
-            lut_wrap="repeat",
-            selection_options={"pixels": self._ac_array.contours},
-            options_color="w",
-            options_alpha=self._contour_opacity,
-            alpha=self._selected_contour_opacity if self._show_selected_contours else 0.0,
-        )
-        self._set_contours(show)
+    def _make_contours(self):
+        """Draw the current footprints' contours on every panel, in place of the ones drawn before; no footprints, none."""
+        if self._contours is not None:
+            for name in self._panels:
+                self._contours.remove_from(self._ndw_fov.figure[name])
+        self._contours = None
+        if self._footprints is None:
+            return
+        self._contours = FootprintContours(self._footprints.outlines)
+        for name in self._panels:
+            self._contours.add_to(self._ndw_fov.figure[name])
+        self._style_contours()
+        self._color_contours()
 
     def demix(self):
         """
@@ -879,6 +878,9 @@ class SingleSessionDemixingVis:
             component = component_at_pixel(
                 self._ac_array.spatial_demixed, self._ac_array.centers, self._shape[1:], (col, row)
             )
+            if component is None:
+                # a pixel in no footprint that a mask fills all the same, between its footprint's own
+                component = self._footprints.at(row, col)
             if component is not None:
                 if mods & {"Control", "Ctrl"}:
                     self.group_toggle(component)
@@ -949,6 +951,8 @@ class SingleSessionDemixingVis:
         self._active_roi = None
         self._active_pixel = None
         self._active_component = int(component)
+        # a signal marked to merge is selected with its group
+        self._group += [k for group in self.merge_groups if component in group for k in group if k not in self._group]
         if self._order is not None:
             if self._order.reveal(self._active_component):
                 self._status = "area filter widened to show the selection"
@@ -977,28 +981,15 @@ class SingleSessionDemixingVis:
             picks.append(self._active_component)
         return picks
 
+    def _color_contours(self):
+        """Every contour takes its mask's color, so it matches its trace too; the group's and the selection's are highlighted."""
+        if self._contours is not None:
+            grouped = {k: rgb for k, rgb in self._group_colors().items() if isinstance(k, int)}
+            self._contours.set_colors(self._footprints.mask_colors(self._marked, grouped), self._highlighted())
+
     def _sync_highlight(self):
-        """The contour selector and the mask overlay both show the group plus the selection, in the same colors."""
-        if self._image_selector is not None:
-            picks = self._highlighted()
-            grouped = self._group_colors()
-            if picks:
-                # the contour of a highlighted signal takes its mask's color, so it matches its trace too
-                self._image_selector.lut = np.array(
-                    [
-                        (
-                            *(
-                                MARKED_COLOR
-                                if k in self._marked
-                                else grouped.get(k, self._footprints.color(k))
-                            ),
-                            1.0,
-                        )
-                        for k in picks
-                    ],
-                    np.float32,
-                )
-            self._image_selector.selection = picks
+        """The contours and the mask overlay both show the group plus the selection, in the same colors."""
+        self._color_contours()
         self._refresh_masks()
 
     def _update_traces(self):
@@ -1210,12 +1201,15 @@ class SingleSessionDemixingVis:
     def _set_contours(self, show: bool):
         """``show`` draws every other footprint's contour at the contour opacity; the selection's has its own pair."""
         self._show_contours = show
-        if self._image_selector is None:
-            return
-        self._image_selector.options_alpha = self._contour_opacity if show else 0.0
-        for g in self._video_graphics():
-            if g is not None and g.graphic not in self._image_selector.graphics:
-                self._image_selector.add_graphic(g.graphic)
+        self._style_contours()
+
+    def _style_contours(self):
+        """Put the Overlay section's contour boxes and opacities on the lines."""
+        if self._contours is not None:
+            self._contours.set_opacity(
+                self._contour_opacity if self._show_contours else 0.0,
+                self._selected_contour_opacity if self._show_selected_contours else 0.0,
+            )
 
     def _drawing(self) -> bool:
         """The region has the pointer: armed, or its vertices are being placed or dragged."""
@@ -1429,13 +1423,53 @@ class SingleSessionDemixingVis:
             self._marked -= signals
         self._order.columns["del"][list(signals)] = on
         self._order.rebuild()
+        self._sync_highlight()
+
+    @property
+    def merge_groups(self) -> list:
+        """The groups of signals marked to merge, each a sorted list of signal indices."""
+        return [] if self._footprints is None else [list(group) for group in self._footprints.merges]
+
+    def mark_merges(self, groups, record: bool = True):
+        """
+        Mark ``groups`` of signals to merge, in place of the groups marked before: each draws as one mask and one
+        contour. The signals keep their traces and table rows, and Demix does not merge them yet.
+
+        Args:
+            groups: groups of signal indices, two or more in each and none in two groups
+            record (bool): keep the state before for ctrl+z
+        """
+        if record:
+            self._snapshot()
+        self._footprints.merge(groups)
+        self._make_contours()
         self._refresh_masks()
 
+    def _merged_together(self, signals) -> bool:
+        """True if ``signals``, one or more, all belong to one group marked to merge."""
+        signals = set(signals)
+        return bool(signals) and any(signals <= set(group) for group in self.merge_groups)
+
+    def _merge_selected(self):
+        """
+        The Merge action: mark the selected signals to merge, together with every marked group one of them is in;
+        a selection inside one marked group unmarks that group.
+        """
+        signals = {k for k in self._group if isinstance(k, int)} or {self._active_component}
+        groups = self.merge_groups
+        touched = [group for group in groups if signals & set(group)]
+        apart = [group for group in groups if group not in touched]
+        if self._merged_together(signals):
+            self.mark_merges(apart)
+        elif len(signals) > 1:
+            self.mark_merges([*apart, signals.union(*touched)])
+
     def _snapshot(self):
-        """Push the curation state for ctrl+z: the marks, drawn rois, pixel averages and selection."""
+        """Push the curation state for ctrl+z: the marks, merge groups, drawn rois, pixel averages and selection."""
         self._undo.append(
             {
                 "marked": set(self._marked),
+                "merges": self.merge_groups,
                 "rois": [
                     (sel, roi["panel"], roi["color"], np.array(sel.selection), roi["trace"], roi["area"])
                     for sel, roi in self._rois.items()
@@ -1489,6 +1523,8 @@ class SingleSessionDemixingVis:
         self._rois.update(rois)
         self._marked.clear()
         self._marked.update(state["marked"])
+        if state["merges"] != self.merge_groups:
+            self.mark_merges(state["merges"], record=False)
         self._filter_select = state["filter_select"]
         self._filter_side = set(state["filter_side"])
         self._region_outside = state["region_outside"]
@@ -1603,6 +1639,8 @@ class SingleSessionDemixingVis:
             return
         if pressed(DEMIXING["delete"]) and self._worker is None:
             self._delete_selected()
+        if pressed(DEMIXING["merge"]) and self._order is not None:
+            self._merge_selected()
         if pressed(DEMIXING["escape"]):
             if self._help_open or self._keybinds_open or self._options_open or self._record_open:
                 self._help_open = self._keybinds_open = self._options_open = self._record_open = False
@@ -1627,7 +1665,7 @@ class SingleSessionDemixingVis:
             self._step_frame(stride)
         if pressed(DEMIXING["left"]):
             self._step_frame(-stride)
-        if pressed(DEMIXING["masks"]) and self._image_selector is not None:
+        if pressed(DEMIXING["masks"]) and self._contours is not None:
             self._show_masks = not self._show_masks
             self._refresh_masks()
         if pressed(DEMIXING["contours"]):
@@ -1661,8 +1699,9 @@ class SingleSessionDemixingVis:
         if len(self._group) > 1 or pixels or rois:
             signals = sorted(k for k in self._group if isinstance(k, int))
             shown = f"{len(signals)} signals" if len(signals) > 12 else f"signals {signals}"
+            merged = " (marked to merge)" if self._merged_together(signals) else ""
             note = "; pixel avgs are marked, delete them when done" if pixels else ""
-            return f"{len(self._group)} grouped: {shown}, rois {rois}, pixel avgs {pixels}{note}"
+            return f"{len(self._group)} grouped: {shown}{merged}, rois {rois}, pixel avgs {pixels}{note}"
         if self._active_component is not None:
             marked = (
                 " (marked for deletion)"
@@ -1956,7 +1995,7 @@ class SingleSessionDemixingVis:
         slider_w = min(0.7 * imgui.get_window_width(), right - g.cell_x[0] - g.mark_w)
 
         section("OVERLAY")
-        if self._image_selector is not None:
+        if self._contours is not None:
             changed, show = imgui.checkbox("masks", self._show_masks)
             if changed:
                 self._show_masks = show
@@ -1998,20 +2037,20 @@ class SingleSessionDemixingVis:
             changed, self._contour_opacity = imgui.slider_float(
                 "##contour-opacity", self._contour_opacity, 0.05, 1.0, "%.2f"
             )
-            if changed and self._show_contours:
-                self._image_selector.options_alpha = self._contour_opacity
-            help_mark("every other footprint's contour at this opacity")
+            if changed:
+                self._style_contours()
+            help_mark("every other footprint's contour, in its mask's color at this opacity")
             changed, show = imgui.checkbox("sel contours", self._show_selected_contours)
             if changed:
                 self._show_selected_contours = show
-                self._image_selector.alpha = self._selected_contour_opacity if show else 0.0
+                self._style_contours()
             g.cell(0)
             imgui.set_next_item_width(slider_w)
             changed, self._selected_contour_opacity = imgui.slider_float(
                 "##selected-contour-opacity", self._selected_contour_opacity, 0.05, 1.0, "%.2f"
             )
-            if changed and self._show_selected_contours:
-                self._image_selector.alpha = self._selected_contour_opacity
+            if changed:
+                self._style_contours()
             help_mark("the selected and grouped contours, in their mask's color at this opacity")
         if self._order is not None:
             g.row("color by")
@@ -2021,8 +2060,8 @@ class SingleSessionDemixingVis:
             if changed:
                 self._color_by = names[index]
                 self._footprints.recolor(None if index == 0 else self._order.columns[self._color_by])
-                self._refresh_masks()
-            help_mark("color the masks and the table's ids by a column's rank instead of by signal id")
+                self._sync_highlight()
+            help_mark("color the masks, their contours and the table's ids by a column's rank instead of by signal id")
         if self._traces.panels:
             g.row("traces")
             buttons = [
@@ -2136,10 +2175,19 @@ class SingleSessionDemixingVis:
             f"until then; a selected drawn roi or pixel average is dropped right away ({key})"
         )
         imgui.same_line(0, gap)
-        imgui.begin_disabled(True)
-        imgui.button(f"{fa.ICON_FA_OBJECT_GROUP}##merge", size)
+        unmerge = self._merged_together(signals)
+        imgui.begin_disabled(len(signals) < 2 and not unmerge)
+        with button_colors(THEME.accent, THEME.accent, (0.05, 0.05, 0.05), on=unmerge):
+            if imgui.button(f"{fa.ICON_FA_OBJECT_GROUP}##merge", size):
+                self._merge_selected()
         imgui.end_disabled()
-        tooltip("Merge: the grouped signals into one, not yet implemented")
+        key = DEMIXING["merge"].label
+        tooltip(
+            f"Unmerge: the {len(signals)} selected signal(s) draw as separate masks again ({key})"
+            if unmerge
+            else f"Merge: mark the {len(signals)} selected signal(s) to merge, drawn as one mask and one contour; "
+            f"it takes two or more, and Demix does not merge them yet ({key})"
+        )
         imgui.same_line(0, gap)
         imgui.begin_disabled(not self._rois)
         if imgui.button(f"{fa.ICON_FA_FILE_EXPORT}##export", size):
