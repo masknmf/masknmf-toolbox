@@ -7,10 +7,19 @@ import numpy as np
 import h5py
 import torch
 
+# arrays smaller than this are written even when the file holds an identical one: a link would save next to nothing
+NUM_BYTES_MIN_LINKED = 2**20
+# an array is compared with a stored dataset this many bytes at a time, so the comparison holds little in memory
+NUM_BYTES_COMPARED = 2**26
+
 
 def save_dict(d, filename, group, exists_ok=False, raise_type_fail=True):
     """
     Recursively save a dict to a hdf5 group in a new file.
+
+    An array the file already holds byte for byte, in any group, is written as an hdf5 hard link to it: a second name
+    for the same stored dataset. The compression that CompressionArray and DemixingResults both hold is stored once
+    that way, and every reader still sees two ordinary datasets.
 
     Args:
         d (dict): dict to save as an hdf5 file
@@ -49,8 +58,10 @@ def save_dict(d, filename, group, exists_ok=False, raise_type_fail=True):
     with h5py.File(filename, writemode) as h5file:
         if group in h5file:
             del h5file[group]
+        paths_by_signature = {}
+        _index_datasets(h5file, paths_by_signature)
         _dicts_to_group(h5file, "{}/".format(group), d,
-                        raise_meta_fail=raise_type_fail)
+                        raise_meta_fail=raise_type_fail, paths_by_signature=paths_by_signature)
     #
     # if not exists_ok:
     #     if os.path.isfile(filename):
@@ -61,7 +72,58 @@ def save_dict(d, filename, group, exists_ok=False, raise_type_fail=True):
     #                     raise_meta_fail=raise_type_fail)
 
 
-def _dicts_to_group(h5file, path, d, raise_meta_fail):
+def _signature(shape, dtype, layout: str | None) -> tuple:
+    """The shape, dtype and layout attribute two arrays must share before their bytes are compared."""
+    return tuple(shape), np.dtype(dtype).str, layout
+
+
+def _index_datasets(group: h5py.Group, paths_by_signature: dict) -> None:
+    """
+    Add the datasets below ``group`` that a new array could link to, by signature: those of at least
+    ``NUM_BYTES_MIN_LINKED`` bytes that carry no attribute but ``layout``, since a link shares the attributes too.
+    """
+    for item in group.values():
+        if isinstance(item, h5py.Group):
+            _index_datasets(item, paths_by_signature)
+        elif isinstance(item, h5py.Dataset) and item.nbytes >= NUM_BYTES_MIN_LINKED and set(item.attrs) <= {"layout"}:
+            signature = _signature(item.shape, item.dtype, item.attrs.get("layout"))
+            paths_by_signature.setdefault(signature, []).append(item.name)
+
+
+def _holds_bytes(dataset: h5py.Dataset, array: np.ndarray) -> bool:
+    """True when ``dataset`` holds exactly the bytes of ``array``, an array of its shape and dtype."""
+    num_rows_block = max(1, NUM_BYTES_COMPARED * len(array) // array.nbytes)
+    return all(
+        dataset[start:start + num_rows_block].tobytes() == np.ascontiguousarray(array[start:start + num_rows_block]).tobytes()
+        for start in range(0, len(array), num_rows_block)
+    )
+
+
+def _write_array(h5file, path: str, array: np.ndarray, layout: str | None, paths_by_signature: dict) -> None:
+    """
+    Write ``array`` at ``path``, or a hard link to a dataset in ``paths_by_signature`` holding the same bytes.
+
+    Args:
+        h5file (h5py.File): The open file.
+        path (str): Where the array goes.
+        array (np.ndarray): A numeric array.
+        layout (str | None): The ``layout`` attribute to set, "strided" for a torch tensor; None sets none.
+        paths_by_signature (dict): The datasets a link may point to, by :func:`_signature`; a new dataset is added.
+    """
+    signature = _signature(array.shape, array.dtype, layout)
+    if array.nbytes >= NUM_BYTES_MIN_LINKED:
+        for path_stored in paths_by_signature.get(signature, []):
+            if _holds_bytes(dataset=h5file[path_stored], array=array):
+                h5file[path] = h5file[path_stored]
+                return
+    h5file[path] = array
+    if layout is not None:
+        h5file[path].attrs["layout"] = layout
+    if array.nbytes >= NUM_BYTES_MIN_LINKED:
+        paths_by_signature.setdefault(signature, []).append(h5file[path].name)
+
+
+def _dicts_to_group(h5file, path, d, raise_meta_fail, paths_by_signature):
     for key, item in d.items():
         if isinstance(item, torch.Tensor):
             if item.layout is torch.sparse_coo:
@@ -79,14 +141,14 @@ def _dicts_to_group(h5file, path, d, raise_meta_fail):
                     h5file,
                     "{}{}/".format(path, key),
                     sparse_dict,
-                    True
+                    True,
+                    paths_by_signature
                 )
 
                 h5file[path + key].attrs["layout"] = "sparse_coo"
 
             elif item.layout is torch.strided:
-                h5file[path + key] = item.cpu().numpy()
-                h5file[path + key].attrs["layout"] = "strided"
+                _write_array(h5file, path + key, item.cpu().numpy(), "strided", paths_by_signature)
 
             else:
                 raise TypeError(
@@ -121,7 +183,7 @@ def _dicts_to_group(h5file, path, d, raise_meta_fail):
 
             # other types
             else:
-                h5file[path + key] = item
+                _write_array(h5file, path + key, item, None, paths_by_signature)
 
         # single pieces of data
         elif isinstance(item, (str, int, np.int8,
@@ -131,7 +193,7 @@ def _dicts_to_group(h5file, path, d, raise_meta_fail):
 
         elif isinstance(item, dict):
             _dicts_to_group(
-                h5file, "{}{}/".format(path, key), item, raise_meta_fail
+                h5file, "{}{}/".format(path, key), item, raise_meta_fail, paths_by_signature
             )
 
         # last resort, try to convert this object
@@ -141,7 +203,8 @@ def _dicts_to_group(h5file, path, d, raise_meta_fail):
                 h5file,
                 "{}{}/".format(path, key),
                 item.__dict__,
-                raise_meta_fail
+                raise_meta_fail,
+                paths_by_signature
             )
 
         else:

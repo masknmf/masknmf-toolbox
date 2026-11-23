@@ -20,9 +20,11 @@ import pytest
 from imgui_bundle import imgui
 
 from masknmf import cli, launcher
+from masknmf.visualization.imgui import parameters
 from masknmf.pipelines import scraper
 from masknmf.pipelines._base import BasePipeline
 from masknmf.pipelines.configs.demixing_configs import NMFConfig
+from masknmf.visualization.pixel_mask import PixelMaskEditor
 
 SLUGS = sorted(scraper.pipeline_registry())
 
@@ -114,9 +116,9 @@ def assert_untouched(window: launcher.Launcher) -> None:
     """An untouched window holds exactly the pipeline's defaults and passes nothing for them."""
     defaults = window.spec.cls.default_configs()
     for section in window.spec.sections:
-        assert launcher.same(window.values[section.argument], defaults[section.argument]), section.argument
-    assert window.modified() == []
-    assert window.errors == {}
+        assert parameters.same(window.values[section.argument], defaults[section.argument]), section.argument
+    assert window.parameters.modified() == []
+    assert window.parameters.errors == {}
     assert "--config" not in window.argv_run()
 
 
@@ -133,7 +135,7 @@ def test_drawing_the_untouched_window_changes_nothing(slug):
 
 
 def record_stage(original, drawn: list, section: scraper.Section) -> None:
-    """Launcher.draw_stage, noting the name of each section drawn."""
+    """Parameters.draw_stage, noting the name of each section drawn."""
     drawn.append(section.name)
     original(section=section)
 
@@ -147,9 +149,9 @@ def tree_node_open(original, label: str) -> bool:
 def draw_parameters_popup(window: launcher.Launcher, monkeypatch) -> list[str]:
     """Draw Run pipeline with the Parameters popup and its folds open, returning the sections it drew."""
     window.page = "run"
-    window.parameters_requested = True
+    window.parameters.open()
     drawn = []
-    monkeypatch.setattr(window, "draw_stage", partial(record_stage, window.draw_stage, drawn))
+    monkeypatch.setattr(window.parameters, "draw_stage", partial(record_stage, window.parameters.draw_stage, drawn))
     monkeypatch.setattr(imgui, "tree_node", partial(tree_node_open, imgui.tree_node))
     render_frames(window=window)
     return drawn
@@ -165,7 +167,7 @@ def test_drawing_the_parameters_popup_changes_nothing(slug, monkeypatch):
 
 def test_the_parameters_popup_puts_configs_from_elsewhere_in_an_other_column(odd_registry, monkeypatch):
     window = launcher.Launcher(slug_initial="odd")
-    assert [stage for stage, _ in window.stage_columns()] == ["Other"]
+    assert [stage for stage, _ in window.parameters.stage_columns()] == ["Other"]
     drawn = draw_parameters_popup(window=window, monkeypatch=monkeypatch)
     assert set(drawn) == {"stage", "empty"}
     assert_untouched(window=window)
@@ -180,42 +182,42 @@ def test_params_json_through_config_reproduces_the_defaults(slug, tmp_path, monk
     written = json.loads(out.getvalue())
     for section in spec.sections:
         rebuilt = cli.section_value(section=section, kind=None, value_file=written["configs"][section.argument])[1]
-        assert launcher.same(rebuilt, section.default), section.argument
+        assert parameters.same(rebuilt, section.default), section.argument
 
 
 def test_resets_restore_the_defaults():
     window = launcher.Launcher(slug_initial="two-photon-calcium")
     spec = window.spec
-    window.select_kind(section=spec.section("motion-correct"), kind="piecewise-rigid")
+    window.parameters.select_kind(section=spec.section("motion-correct"), kind="piecewise-rigid")
     window.values["compress_config"].max_components = 3
     passes = window.values["filtered_demixing_config"].DemixingConfigs
     passes[0].NMFConfig.maxiter = 1
     passes.append(copy.deepcopy(passes[-1]))
     window.texts["device"] = "cpu"
-    assert len(window.modified()) == 5
+    assert len(window.parameters.modified()) == 5
 
-    window.reset_field(config=window.values["compress_config"], name="max_components",
-                       default=spec.section("compress").default.max_components, path="compress_config.max_components")
+    window.parameters.reset_field(config=window.values["compress_config"], name="max_components",
+                                  default=spec.section("compress").default.max_components, path="compress_config.max_components")
     assert window.values["compress_config"] == spec.section("compress").default
-    window.reset_section(section=spec.section("filtered-demixing"))
+    window.parameters.reset_section(section=spec.section("filtered-demixing"))
     assert window.values["filtered_demixing_config"] == spec.section("filtered-demixing").default
     window.texts["frame-rate"] = "30"
-    window.reset_all()
+    window.parameters.reset_all()
     assert window.texts["frame-rate"] == "30"
     assert_untouched(window=window)
 
 
 def test_cell_radius_rewrites_the_demixing_passes_the_window_shows():
     window = launcher.Launcher(slug_initial="one-photon-calcium")
-    window.set_meta_parameter(name="cell_radius", value=8)
+    window.parameters.set_meta_parameter(name="cell_radius", value=8)
     passes = [p for name in ("filtered_demixing_config", "unfiltered_demixing_config")
               for p in window.values[name].DemixingConfigs]
     assert [p.NMFConfig.ring_radius for p in passes] == [17, 17, 17, 17]
     assert [p.NMFConfig.background_downsampling_factor for p in passes] == [30, 30, 50, 50]
-    assert len(window.modified()) == 4
+    assert len(window.parameters.modified()) == 4
     render_frames(window=window)
     assert "--config" in window.argv_run()
-    window.reset_all()
+    window.parameters.reset_all()
     assert_untouched(window=window)
 
 
@@ -223,17 +225,17 @@ def test_lowering_the_cell_radius_lowers_the_background_downsampling_it_raised()
     window = launcher.Launcher(slug_initial="two-photon-calcium")
     passes = [p for name in ("filtered_demixing_config", "unfiltered_demixing_config")
               for p in window.values[name].DemixingConfigs]
-    assert window.cell_radius == 10
-    window.cell_radius_on = True
-    window.cell_radius = 25
-    window.set_cell_radius(checked_now=True)
+    assert window.parameters.cell_radius == 10
+    window.parameters.cell_radius_on = True
+    window.parameters.cell_radius = 25
+    window.parameters.set_cell_radius(checked_now=True)
     assert {p.NMFConfig.background_downsampling_factor for p in passes} == {50}
-    window.cell_radius = 8
-    window.set_cell_radius(checked_now=False)
+    window.parameters.cell_radius = 8
+    window.parameters.set_cell_radius(checked_now=False)
     assert {p.NMFConfig.ring_radius for p in passes} == {17}
     assert {p.NMFConfig.background_downsampling_factor for p in passes} == {30}
-    window.reset_all()
-    assert not window.cell_radius_on
+    window.parameters.reset_all()
+    assert not window.parameters.cell_radius_on
     assert_untouched(window=window)
 
 
@@ -250,14 +252,14 @@ def test_switching_a_nested_config_and_back_restores_its_default(odd_registry):
     window = launcher.Launcher(slug_initial="odd")
     config_pass = window.values["stage_config"].passes[0]
     default_pass = window.spec.section("stage").default.passes[0]
-    window.select_nested(config=config_pass, name="InitConfig", kind="other-init", default=default_pass.InitConfig,
-                         path="stage_config.passes[0].InitConfig")
+    window.parameters.select_nested(config=config_pass, name="InitConfig", kind="other-init", default=default_pass.InitConfig,
+                                    path="stage_config.passes[0].InitConfig")
     assert isinstance(config_pass.InitConfig, OtherInitConfig)
-    assert window.modified() != []
-    window.select_nested(config=config_pass, name="InitConfig", kind="odd-init", default=default_pass.InitConfig,
-                         path="stage_config.passes[0].InitConfig")
-    assert launcher.same(config_pass.InitConfig, default_pass.InitConfig)
-    assert window.modified() == []
+    assert window.parameters.modified() != []
+    window.parameters.select_nested(config=config_pass, name="InitConfig", kind="odd-init", default=default_pass.InitConfig,
+                                    path="stage_config.passes[0].InitConfig")
+    assert parameters.same(config_pass.InitConfig, default_pass.InitConfig)
+    assert window.parameters.modified() == []
 
 
 def test_load_run_fills_the_window_from_a_runs_config_json(tmp_path):
@@ -277,9 +279,9 @@ def test_load_run_fills_the_window_from_a_runs_config_json(tmp_path):
     assert window.texts["frame-rate"] == "7.5" and window.texts["stop-after"] == "registration"
     assert window.texts["frame-batch-size"] == "123" and window.texts["device"] == "cpu"
     assert window.texts["output-folder"] == str(tmp_path.resolve())
-    assert {row[0] for row in window.modified()} == {"stop_after", "output_folder", "frame_batch_size", "device"}
+    assert {row[0] for row in window.parameters.modified()} == {"stop_after", "output_folder", "frame_batch_size", "device"}
     for section in window.spec.sections:
-        assert launcher.same(window.values[section.argument], cls.default_configs()[section.argument]), section.argument
+        assert parameters.same(window.values[section.argument], cls.default_configs()[section.argument]), section.argument
     argv = window.argv_run()
     assert argv[:3] == ["run", "--pipeline", "two-photon-calcium"] and str(tmp_path / "movie.h5") in argv
     assert "--dataset" in argv and "--config" not in argv
@@ -316,7 +318,7 @@ def test_start_from_a_loaded_runs_compression_resumes_it_and_back_to_the_movie_r
     assert argv[argv.index("--resume") + 1] == str(folder / "results.hdf5") and "--config" in argv
     assert window.values["compress_config"] == "skip"
     window.select_start(start="movie")
-    assert launcher.same(window.values["compress_config"], cls.default_configs()["compress_config"])
+    assert parameters.same(window.values["compress_config"], cls.default_configs()["compress_config"])
     assert "--resume" not in window.argv_run()
 
 
@@ -356,17 +358,53 @@ def test_switching_pipeline_from_a_card_mid_frame_draws_on(monkeypatch):
     assert_untouched(window=window)
 
 
+def open_mask_page(window, filepath: Path):
+    """The editor's page open on a 4 x 4 movie, as the launcher has it once the movie is read."""
+    images = {"mean": np.ones((4, 4)), "sd": np.ones((4, 4))}
+    editor = PixelMaskEditor(images=images, filepath_out=str(filepath))
+    window.mask_page = launcher.MaskPage(
+        key="pixel_mask", filepath_movie="movie.tif", filepath_out=str(filepath), images=images, editor=editor
+    )
+    return editor
+
+
+def test_launcher_fills_the_row_only_after_apply(tmp_path):
+    window = launcher.Launcher()
+    assert "pixel_mask" in window.paths
+    filepath = tmp_path / "movie_pixel_mask.npy"
+
+    open_mask_page(window=window, filepath=filepath).close(applied=False)
+    window.close_mask_page()
+    assert window.paths["pixel_mask"] == "" and window.mask_page is None and not filepath.exists()
+
+    open_mask_page(window=window, filepath=filepath).close(applied=True)
+    window.close_mask_page()
+    assert np.load(filepath).all()
+    assert window.paths["pixel_mask"] == str(filepath)
+    argv = window.argv_run()
+    assert argv[argv.index("--pixel-mask") + 1] == str(filepath)
+
+
+def test_each_movie_of_a_two_movie_pipeline_has_its_own_mask_row():
+    window = launcher.Launcher(slug_initial="glutamate-calcium-spine")
+    window.paths["glutamate_channel"] = "glu.tif"
+    assert window.movie_for_mask(key="glutamate_pixel_mask") == "glu.tif"
+    assert window.movie_for_mask(key="calcium_pixel_mask") == ""
+    window.paths["calcium_channel"] = "ca.tif"
+    assert window.movie_for_mask(key="calcium_pixel_mask") == "ca.tif"
+
+
 def test_the_uniform_min_brightness_control_starts_at_the_pipelines_own_and_defaults_unchecks_it():
     spines = launcher.Launcher(slug_initial="glutamate-calcium-spine")
-    assert spines.uniform_min_brightness == 0.0
+    assert spines.parameters.uniform_min_brightness == 0.0
     window = launcher.Launcher(slug_initial="two-photon-calcium")
-    assert window.uniform_min_brightness == 1.0
-    window.uniform_min_brightness_on = True
-    window.uniform_min_brightness = 3.0
+    assert window.parameters.uniform_min_brightness == 1.0
+    window.parameters.uniform_min_brightness_on = True
+    window.parameters.uniform_min_brightness = 3.0
     window.start_from = "registration"
-    window.reset_all()
-    assert not window.uniform_min_brightness_on
-    assert window.uniform_min_brightness == 1.0
+    window.parameters.reset_all()
+    assert not window.parameters.uniform_min_brightness_on
+    assert window.parameters.uniform_min_brightness == 1.0
     assert window.start_from == "movie"
 
 
@@ -374,3 +412,14 @@ def test_the_nmf_signal_sign_is_a_choice():
     params = scraper.scrape_dataclass(cls_config=NMFConfig, name_section="nmf")
     sign = next(p for p in params if p.field == "sign")
     assert tuple(sign.choices) == ("positive", "negative", "unconstrained")
+
+
+def test_a_served_run_goes_to_the_background_with_a_log(tmp_path, monkeypatch):
+    monkeypatch.setattr(launcher, "DIR_JOBS", tmp_path)
+    window = launcher.Launcher()
+    window.start_job(argv=["params", "--help"])
+    process, filepath_log = window.job
+    assert window.job_running() or process.returncode is not None
+    assert process.wait(timeout=120) == 0
+    assert not window.job_running()
+    assert filepath_log.parent == tmp_path and "usage" in filepath_log.read_text()

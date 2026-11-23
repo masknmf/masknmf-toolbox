@@ -82,6 +82,11 @@ DEMIXING: Mapping[str, Bind] = {
         "when all are)",
         (imgui.Key.d, imgui.Key.delete),
     ),
+    "merge": Bind(
+        "g",
+        "mark the selected signals to merge: one mask and one contour, one signal after the next demix (unmark when they already are)",
+        imgui.Key.g,
+    ),
     "escape": Bind(
         "esc",
         "close the help and keybinds windows, drop the drawn region (the selection stays), else deselect everything "
@@ -89,7 +94,7 @@ DEMIXING: Mapping[str, Bind] = {
         imgui.Key.escape,
     ),
     "select_all": Bind("ctrl + a", "group every signal the table shows", imgui.Key.a, ctrl=True),
-    "undo": Bind("ctrl + z", "undo the last mark, drawn roi, pixel average or deselect", imgui.Key.z, ctrl=True),
+    "undo": Bind("ctrl + z", "undo the last mark, merge, drawn roi, pixel average or deselect", imgui.Key.z, ctrl=True),
     "help": HELP,
     "keybinds": KEYBINDS,
     "larger": LARGER,

@@ -150,7 +150,7 @@ TOOL_BUTTONS = (
     (fa.ICON_FA_SIGNATURE, "freehand", DIM),
     (fa.ICON_FA_PLUS, "add roi (r)", TEXT),
     (fa.ICON_FA_TRASH, "delete (d)", DROP),
-    (fa.ICON_FA_OBJECT_GROUP, "merge", DIM),
+    (fa.ICON_FA_OBJECT_GROUP, "merge (g)", TEXT),
     (fa.ICON_FA_LOCATION_CROSSHAIRS, "center (f)", ACCENT),
 )
 # the overlay sketch: the four cells and a speck of junk, each signal's strength against the strongest, in mask colors
@@ -174,7 +174,7 @@ PIXEL_LINE = (("slow", 5, GROUP[2]),)
 OVERLAY = (
     ("control", "description"),
     ("masks (m)", "every footprint feathered by its weights; sel masks: the selection at its own peak, white rim"),
-    ("contours (c)", "every footprint's outline; sel contours: the selection's, in its mask color"),
+    ("contours (c)", "every footprint's outline, in its mask color; sel contours: the selection's, wider"),
     ("color by", "masks and table ids by a column's rank instead of signal id"),
     ("center (t)", "keep the current frame centered in the traces"),
     ("pixel traces (p)", "an empty pixel's 5x5 compressed average on click"),
@@ -199,7 +199,11 @@ TOOLS = (
         "mark the selected signals for the next demix, again unmarks; a selected roi or pixel average is "
         "dropped right away",
     ),
-    ("merge", "the grouped signals into one, not yet implemented"),
+    (
+        "merge (g)",
+        "mark the grouped signals to merge: they draw as one mask and one contour, and a click on it selects them "
+        "all; again unmarks. The next Demix makes them one signal",
+    ),
     ("center (f)", "every panel on the selected signal, following it as the selection moves"),
     (
         "in / out",
@@ -598,7 +602,7 @@ def draw_curation_help(is_open: bool, keys_open: bool) -> tuple[bool, bool]:
     box(dl, x, y, 9 * em, bh, "results.hdf5", TEXT)
     x += 9 * em
     arrow(dl, x + 0.4 * em, x + 9.6 * em, y + bh / 2)
-    notes = (("+ drawn ROIs", SIGNAL, -1.3 * em), ("- marked signals", DROP, 0.3 * em))
+    notes = (("+ drawn ROIs", SIGNAL, -2.1 * em), ("- marked signals", DROP, -0.5 * em), ("merge groups", KEY, 1.1 * em))
     for text, color, dy in notes:
         size = imgui.calc_text_size(text)
         dl.add_text(imgui.ImVec2(x + (10 * em - size.x) / 2, y + bh / 2 + dy), u32(color), text)

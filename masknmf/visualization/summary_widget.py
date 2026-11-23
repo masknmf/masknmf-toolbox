@@ -79,6 +79,20 @@ def _format_value(v: float, dtype) -> str:
     return f"{v:.2f}"
 
 
+def _grid_fit(count: int, per_line: int, w: int, h: int, cw: float, ch: float) -> tuple[int, int, float]:
+    """
+    Lay ``count`` images of w x h px on a cw x ch canvas, ``per_line`` to a line (0: the count that draws them
+    largest). Returns (images per line, lines, screen px per image px).
+    """
+    best = (1, count, 0.0)
+    for columns in ([per_line] if per_line > 0 else range(1, count + 1)):
+        lines = -(-count // columns)
+        fit = min((cw - _ROW_GAP * (columns - 1)) / (columns * w), (ch - _ROW_GAP * (lines - 1)) / (lines * h))
+        if fit > best[2]:
+            best = (columns, lines, fit)
+    return best
+
+
 class _GpuImage:
     """Owns one wgpu texture + its imgui registration for a single image."""
 
@@ -190,6 +204,7 @@ class SummaryImageViewer:
         self._needs_fit = True
         self._center: Optional[tuple] = None  # (y, x, span) in image pixels to center on at the next draw
         self._cell_height: Optional[float] = None  # how tall a row's images were on screen last frame
+        self._grid_columns = 0  # images per line of a row's grid; 0 picks the count that draws them largest
         self._show_pixel_values = False
         self._highlight: Optional[tuple] = None  # (y0, x0, h, w) in image coords
         self._overlay: Optional[np.ndarray] = None  # float (H, W, 4) drawn over the image
@@ -374,6 +389,16 @@ class SummaryImageViewer:
         _, self._show_pixel_values = imgui.checkbox(
             "pixel values", self._show_pixel_values
         )
+        row = self._images.get(keys[self._selected])
+        if isinstance(row, list) and len(row) > 1:
+            imgui.same_line()
+            imgui.set_next_item_width(90)
+            changed, columns = imgui.input_int("columns", self._grid_columns)
+            if changed:
+                self._grid_columns = int(np.clip(columns, 0, len(row)))
+                self._reset_view()
+            if imgui.is_item_hovered():
+                imgui.set_tooltip("images per line; 0 picks the count that draws them largest in this window")
         return keys[self._selected]
 
     def _draw_contrast_panel(self, key: str, arr: np.ndarray):
@@ -490,8 +515,9 @@ class SummaryImageViewer:
             w = min(52.0 * em, viewport.size.x * 0.92)
             h = min(56.0 * em, viewport.size.y * 0.92)
             row = self._images.get(keys[self._selected])
-            if isinstance(row, list):
-                # a row opens no wider than the viewer, so its height follows from the images' shape
+            if isinstance(row, list) and len(row) <= 4:
+                # a short row opens no wider than the viewer, so its height follows from the images' shape; a longer
+                # one opens in the default shape and wraps into a grid
                 w = viewport.size.x * 0.92
                 h = min(h, w / len(row) * row[0][1].shape[0] / row[0][1].shape[1] + 7.0 * em)
             imgui.set_next_window_size(imgui.ImVec2(w, h), imgui.Cond_.first_use_ever)
@@ -547,19 +573,19 @@ class SummaryImageViewer:
 
         # every image is drawn in a cell: the whole canvas for one image, a row's cells side by side
         cell_w, cell_h, left = cw, ch, canvas_pos.x
+        per_line, lines = 1, 1
         if isinstance(self._images.get(key), list):
-            gaps = _ROW_GAP * (len(columns) - 1)
-            # the whole row always fits the canvas: as tall as it, or as wide when the window is too narrow for that
-            fit = min(ch / h, (cw - gaps) / (len(columns) * w))
+            # the whole grid always fits the canvas; with no column count set, the one that draws the images largest
+            per_line, lines, fit = _grid_fit(len(columns), self._grid_columns, w, h, cw, ch)
             cell_w, cell_h = w * fit, h * fit
-            left = canvas_pos.x + (cw - len(columns) * cell_w - gaps) * 0.5
+            left = canvas_pos.x + (cw - per_line * cell_w - _ROW_GAP * (per_line - 1)) * 0.5
             if self._cell_height is not None and not self._needs_fit:
                 # a resized window takes the zoom and pan along: a fitted image stays fitted
                 self._zoom *= cell_h / self._cell_height
                 self._pan_x *= cell_h / self._cell_height
                 self._pan_y *= cell_h / self._cell_height
             self._cell_height = cell_h
-        top = canvas_pos.y + (ch - cell_h) * 0.5
+        top = canvas_pos.y + (ch - lines * cell_h - _ROW_GAP * (lines - 1)) * 0.5
 
         if self._needs_fit:
             self._zoom = float(min(cell_w / w, cell_h / h)) if w > 0 and h > 0 else 1.0
@@ -579,8 +605,9 @@ class SummaryImageViewer:
         io = imgui.get_io()
         hovered = None
         for column in range(len(columns)):
-            x = left + column * (cell_w + _ROW_GAP)
-            imgui.set_cursor_screen_pos(imgui.ImVec2(x, top))
+            x = left + (column % per_line) * (cell_w + _ROW_GAP)
+            y = top + (column // per_line) * (cell_h + _ROW_GAP)
+            imgui.set_cursor_screen_pos(imgui.ImVec2(x, y))
             imgui.invisible_button(f"##pan_capture{column}", imgui.ImVec2(cell_w, cell_h))
             if imgui.is_item_active():
                 self._pan_x += io.mouse_delta.x
@@ -589,7 +616,7 @@ class SummaryImageViewer:
                 hovered = column
             if imgui.is_item_hovered() and io.mouse_wheel != 0.0:
                 mx = io.mouse_pos.x - x
-                my = io.mouse_pos.y - top
+                my = io.mouse_pos.y - y
                 old = self._zoom
                 self._zoom = float(np.clip(old * (1.1**io.mouse_wheel), 0.05, 64.0))
                 scale = self._zoom / old
@@ -599,10 +626,11 @@ class SummaryImageViewer:
         readout = ""
         draw_list = imgui.get_window_draw_list()
         for column, ((caption, image), gpu) in enumerate(zip(columns, gpus)):
-            x = left + column * (cell_w + _ROW_GAP)
-            img_min = imgui.ImVec2(x + self._pan_x, top + self._pan_y)
+            x = left + (column % per_line) * (cell_w + _ROW_GAP)
+            y = top + (column // per_line) * (cell_h + _ROW_GAP)
+            img_min = imgui.ImVec2(x + self._pan_x, y + self._pan_y)
             img_max = imgui.ImVec2(img_min.x + w * self._zoom, img_min.y + h * self._zoom)
-            draw_list.push_clip_rect(imgui.ImVec2(x, top), imgui.ImVec2(x + cell_w, top + cell_h), True)
+            draw_list.push_clip_rect(imgui.ImVec2(x, y), imgui.ImVec2(x + cell_w, y + cell_h), True)
             draw_list.add_image(gpu.ref, img_min, img_max)
             rect = self._highlight[column] if isinstance(self._highlight, list) else self._highlight
             if rect is not None:
@@ -612,12 +640,12 @@ class SummaryImageViewer:
                 box = imgui.color_convert_float4_to_u32(imgui.ImVec4(1.0, 0.9, 0.2, 0.9))
                 draw_list.add_rect(p0, p1, box, 0.0, 2.0)
             if self._show_pixel_values:
-                self._draw_pixel_values(draw_list, image, imgui.ImVec2(x, top), imgui.ImVec2(cell_w, cell_h), gpu)
+                self._draw_pixel_values(draw_list, image, imgui.ImVec2(x, y), imgui.ImVec2(cell_w, cell_h), gpu)
             if caption:
                 size = imgui.calc_text_size(caption)
                 shade = imgui.color_convert_float4_to_u32(imgui.ImVec4(0.0, 0.0, 0.0, 0.6))
-                draw_list.add_rect_filled(imgui.ImVec2(x, top), imgui.ImVec2(x + size.x + 10, top + size.y + 6), shade)
-                draw_list.add_text(imgui.ImVec2(x + 5, top + 3), imgui.color_convert_float4_to_u32(imgui.ImVec4(1, 1, 1, 1)), caption)
+                draw_list.add_rect_filled(imgui.ImVec2(x, y), imgui.ImVec2(x + size.x + 10, y + size.y + 6), shade)
+                draw_list.add_text(imgui.ImVec2(x + 5, y + 3), imgui.color_convert_float4_to_u32(imgui.ImVec4(1, 1, 1, 1)), caption)
             draw_list.pop_clip_rect()
             if column == hovered:
                 # the footer reads the image under the pointer

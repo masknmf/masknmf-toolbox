@@ -8,6 +8,7 @@ from masknmf.visualization.imgui.picking import (
 from masknmf.visualization.imgui.layout import (
     HANDLE_THICKNESS,
     draw_edge_handle,
+    frame_slider_map,
     is_notebook_canvas,
     resolve_time_reference,
 )
@@ -82,5 +83,6 @@ __all__ = [
     "contours_to_bbox",
     "zoom_to_bbox",
     "resolve_time_reference",
+    "frame_slider_map",
     "is_notebook_canvas",
 ]

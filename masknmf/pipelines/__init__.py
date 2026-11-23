@@ -1,9 +1,7 @@
-from masknmf.pipelines.widefield.widefield_calcium import WidefieldSinglechannelPipeline
-from masknmf.pipelines.twophoton_calcium.twophoton_population_imaging import TwoPhotonCalciumPipeline
-from masknmf.pipelines.onephoton_calcium.onephoton_calcium_population_imaging import OnePhotonCalciumPipeline
-from masknmf.pipelines.onephoton_voltage.onephoton_population_imaging import OnePhotonCulturePipeline
-from masknmf.pipelines.subcellular.glutamate_calcium_spines import GlutamateCalciumSpinePipeline
-from masknmf.pipelines.configs import *
+import lazy_loader
+
+# NOTE: names load on first use, so reading one config dataclass does not import every pipeline
+__getattr__, __dir__, _ = lazy_loader.attach_stub(__name__, __file__)
 
 __all__ = [
     "TwoPhotonCalciumPipeline",

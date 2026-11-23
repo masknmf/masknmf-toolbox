@@ -1,4 +1,4 @@
-"""Edit saved demixing results: add hand-drawn masks and/or remove signals, then rerun the NMF pass."""
+"""Edit saved demixing results: add hand-drawn masks, remove signals and/or merge signals, then rerun the NMF pass."""
 
 import json
 import os
@@ -20,9 +20,10 @@ def update_signals(
     nmf_config=None,
     device: str = "cpu",
     frame_batch_size: int = 5000,
+    merge_indices: Sequence[Sequence[int]] = (),
 ) -> DemixingResults:
     """
-    Re-demix with the ``drop`` signals removed and ``masks`` appended to the rest.
+    Re-demix with the ``drop`` signals removed, each ``merge_indices`` group made one signal and ``masks`` appended.
 
     Args:
         results (DemixingResults): the results to edit
@@ -31,17 +32,26 @@ def update_signals(
         nmf_config: an NMFConfig (or its dict) so the pass matches the one that produced ``results``
         device (str): "cpu" or "cuda"
         frame_batch_size (int): frames loaded onto the device at a time
+        merge_indices (Sequence[Sequence[int]]): disjoint groups of two or more existing signals; each group
+            becomes one signal, placed after the signals that were not merged
 
     Returns:
-        DemixingResults after the NMF pass over the remaining and added signals
+        DemixingResults after the NMF pass over the remaining, merged and added signals
     """
     drop = sorted({int(i) for i in drop}) if drop else []
+    merged = [int(i) for group in merge_indices for i in group]
     num_masks = 0 if masks is None else masks.shape[-1]
-    if num_masks == 0 and not drop:
-        raise ValueError("nothing to do: no masks to add and no signals to drop")
+    if num_masks == 0 and not drop and not merge_indices:
+        raise ValueError("nothing to do: no masks to add, no signals to drop and none to merge")
+    if any(len(group) < 2 for group in merge_indices):
+        raise ValueError("each merge group needs two or more signals")
+    if len(set(merged)) != len(merged) or set(merged) & set(drop):
+        raise ValueError("merge groups must not share a signal with each other or with drop")
     if num_masks == 0 and len(drop) >= results.spatial_demixed.shape[1]:
         raise ValueError("dropping every signal leaves nothing to demix")
-    demixer = SignalDemixer.from_results(results, device=device, frame_batch_size=frame_batch_size, drop=drop)
+    demixer = SignalDemixer.from_results(
+        results, device=device, frame_batch_size=frame_batch_size, drop=drop, merge_indices=merge_indices
+    )
     if num_masks:
         demixer.initialize_signals(is_custom=True, spatial_footprints=np.asarray(masks, dtype=np.float32))
     else:
@@ -88,6 +98,7 @@ def write_curated(
     num_masks: int = 0,
     filters: Sequence[dict] = (),
     nmf_config=None,
+    merges: Sequence[Sequence[int]] = (),
 ) -> str:
     """
     Write ``results`` to a new ``<stem>.<timestamp>.curated.hdf5`` beside ``path``, the stem being the results
@@ -97,7 +108,7 @@ def write_curated(
     good frames, and a pipeline's other results. The new file's
     ``description`` attribute says what was done, and which range filter removed which signals: each of ``filters``
     has a ``column``, a ``range`` (lo, hi), ``outside`` (which side of the range it took) and the ``signals`` it
-    marked. ``nmf_config``, the NMFConfig (or its dict) the pass ran with, is kept in the new file's ``nmf_config``
+    marked, and which signals of ``merges`` (the groups merged) became one. ``nmf_config``, the NMFConfig (or its dict) the pass ran with, is kept in the new file's ``nmf_config``
     attribute as json, the way config.json writes it, so :func:`masknmf.io.read_nmf_config` finds the pass that
     produced the file's signals.
 
@@ -105,6 +116,12 @@ def write_curated(
         the path written
     """
     out = os.path.join(os.path.dirname(str(path)), f"{results_stem(path)}.{get_timestamp()}{CURATED_SUFFIX}")
+    # NOTE: the copied groups go in before the export, so the export links the arrays it shares with them (the
+    # compression) instead of storing them a second time
+    with h5py.File(path, "r") as source, h5py.File(out, "w") as f:
+        for name in source:
+            if name != DemixingResults.__name__:
+                source.copy(source[name], f, name=name)
     results.export(out)
     by_filter = "; ".join(
         f"{flt['column']} {'outside' if flt['outside'] else 'inside'} {flt['range'][0]:g} to {flt['range'][1]:g}: "
@@ -112,13 +129,12 @@ def write_curated(
         for flt in filters
         if flt["signals"]
     )
-    with h5py.File(path, "r") as source, h5py.File(out, "a") as f:
-        for name in source:
-            if name not in f:
-                source.copy(source[name], f, name=name)
+    by_group = "; ".join(" + ".join(str(k) for k in group) for group in merges)
+    with h5py.File(out, "a") as f:
         f.attrs["description"] = (
             f"Demixing results after curation: {len(drop)} signal(s) removed"
             + (f" ({by_filter})" if by_filter else "")
+            + (f", {len(merges)} group(s) of signals merged ({by_group})" if merges else "")
             + f" and {int(num_masks)} drawn roi(s) added, then a full NMF pass."
         )
         if nmf_config is not None:

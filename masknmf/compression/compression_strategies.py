@@ -1,7 +1,6 @@
 from typing import Optional, Literal
 import masknmf
 from masknmf.compression import CompressionArray
-from masknmf.compression.denoising import train_total_variance_denoiser
 from masknmf.compression.decomposition import compression_routine
 from masknmf import ArrayLike
 import numpy as np

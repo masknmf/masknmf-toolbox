@@ -29,10 +29,7 @@ move to a sibling `visualization/common/`.
   (`add_rectangle` / `resize_rect` / `end_resize`, the per-graphic selector `OrderedDict`,
   `rect_selector_kwargs`): a self-contained "draw one rect, mirror it across synced
   subplots, fire a callback on release" widget. Biggest remaining extraction.
-- **selection.py** — the `ImageHighlightSelector` wiring repeated in curation /
-  multisession / demixing (`lut="tab10"`, `lut_wrap="repeat"`, contour pixel options,
-  white options color): a `make_contour_selector(contours, **overrides)` factory, plus the
-  `SelectionVector` + global/local index-map pattern from multisession.
+- **selection.py** — the `SelectionVector` + global/local index-map pattern from multisession.
 - **layout.grid_extents** — curation and demixing build fractional extents dicts by hand;
   a rows/cols -> extents helper would remove both.
 - **layout camera linking** — multisession shares one camera across the video and MIP

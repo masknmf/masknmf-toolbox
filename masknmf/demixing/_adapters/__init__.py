@@ -3,8 +3,9 @@ from masknmf.demixing._adapters._suite2p_adapter import Suite2pResults, suite2p_
 from masknmf.demixing._adapters._miniali_adapter import MiniALIResults
 from masknmf.demixing._adapters._caiman_adapter import CaimanResults, load_caiman_memmap 
 from masknmf.demixing._adapters._giant_adapter import GiantResults
+from masknmf.demixing._adapters._ali_adapter import ALIResults
 
-ADAPTERS = (Suite2pResults, CaimanResults, MiniALIResults, GiantResults)
+ADAPTERS = (Suite2pResults, CaimanResults, MiniALIResults, GiantResults, ALIResults)
 
 
 def adapter_for(path) -> type[BaseResults] | None:

@@ -6,7 +6,7 @@ import numpy as np
 from fastplotlib.ui import ImguiWindow
 from imgui_bundle import imgui, implot
 
-from masknmf.visualization.imgui.layout import draw_edge_handle
+from masknmf.visualization.imgui.layout import draw_edge_handle, nearest_frame
 from masknmf.visualization.imgui.theme import em, opaque_popups, to_vec4
 
 _CURSOR_COLOR = imgui.ImVec4(1.0, 1.0, 1.0, 0.7)
@@ -16,12 +16,6 @@ _SEEK_GAIN = 0.15
 _FOLLOW_SPEED_GAIN = _FOLLOW_GAIN**2 / (2 - _FOLLOW_GAIN)
 # seconds between slider-drag fetches; fastplotlib's 0.05 drags at 20 Hz
 _DRAG_THROTTLE = 1 / 60
-
-
-def _nearest(xs: np.ndarray, value: float) -> int:
-    """Index of the sample in sorted ``xs`` nearest ``value``."""
-    i = int(np.clip(np.searchsorted(xs, value), 1, len(xs) - 1))
-    return i - 1 if value - xs[i - 1] <= xs[i] - value else i
 
 
 class TracePlot:
@@ -38,6 +32,7 @@ class TracePlot:
         link_y: bool = False,
         autofit: bool = True,
         decimate: bool = True,
+        time_unit: Optional[str] = None,
     ):
         """
         Args:
@@ -45,9 +40,11 @@ class TracePlot:
                 set; the first data and "fit now" still fit. Toggled from the right-click popup too.
             decimate (bool): draw a trace with more samples than the panel has pixel columns as a
                 min/max band under its mean, rather than a polyline that smears into a solid block.
+            time_unit (str | None): the unit of ``frame_timings``, shown on the time axis ("time (s)").
         """
         self._link_y = link_y
         self._use_time = False
+        self._time_label = "time" if time_unit is None else f"time ({time_unit})"
         self._autofit = autofit
         self._decimate = decimate
         self._fit = False
@@ -73,7 +70,7 @@ class TracePlot:
         self._panels = tuple(panels)
         self._lines = {name: [] for name in self._panels}
         self._frames = np.arange(num_frames, dtype=np.float32)
-        # timings kept as given so frame lookups agree with the NDWidget's own searchsorted mapping
+        # timings kept as given so frame lookups agree with the viewers' slider maps (frame_slider_map)
         self._timings = None
         self._time = None
         if frame_timings is not None and not np.array_equal(frame_timings, self._frames):
@@ -88,10 +85,10 @@ class TracePlot:
         self._x_span = None  # the x limits drawn last frame
         self._track = None  # (center, speed, seeking) of the followed span, None until follow takes over
         if self._linked is not None:
-            # the widget's range for the dim is new too: its drag throttle, and the index snapped to a frame
+            # the widget's range for the dim is new too, with fastplotlib's drag throttle
             indices, dim = self._linked
             indices.ref_ranges[dim].throttle = _DRAG_THROTTLE
-            indices.set_dim_index(dim, indices[dim])
+            self.frame = nearest_frame(self._ref, indices[dim])
 
     @property
     def _ref(self) -> np.ndarray:
@@ -177,39 +174,16 @@ class TracePlot:
 
     def link(self, indices, dim: str = "time"):
         """
-        Follow and drive a fastplotlib ReferenceIndices (``ndw.indices``) on ``dim``, in its reference units.
-        Every value set on ``dim`` snaps to a frame: whole frame numbers, or a frame's timing.
+        Follow and drive a fastplotlib ReferenceIndices (``ndw.indices``) on ``dim``, in its reference units: frame
+        numbers, or times. The index holds any value in its range; the playhead marks the frame nearest it, the one
+        the viewers' slider maps (``frame_slider_map``) show.
         """
-        clamp, set_dim_index = indices._clamp, indices.set_dim_index
-
-        def snap(d, value):
-            value = clamp(d, value)
-            if d != dim:
-                return value
-            ref = self._ref
-            k = _nearest(ref, value)
-            # play and step add one step to the index, which must still move a frame where timings are uneven
-            current = indices[dim]
-            if value > current and ref[k] <= current:
-                k = min(k + 1, len(ref) - 1)
-            elif value < current and ref[k] >= current:
-                k = max(k - 1, 0)
-            return k if self._timings is None else float(ref[k])
-
-        def set_dim_index_once(d, index, cancel_awaiting=False):
-            # a drag lands on the shown frame many times over; refetching it only stalls the drag
-            if cancel_awaiting and d == dim and snap(d, index) == indices[dim]:
-                return
-            set_dim_index(d, index, cancel_awaiting)
-
-        indices._clamp = snap
-        indices.set_dim_index = set_dim_index_once
         self._linked = (indices, dim)
         indices.ref_ranges[dim].throttle = _DRAG_THROTTLE
-        indices.set_dim_index(dim, indices[dim])
+        self.frame = nearest_frame(self._ref, indices[dim])
 
         def follow(current):
-            self.frame = np.searchsorted(self._ref, current[dim])
+            self.frame = nearest_frame(self._ref, current[dim])
 
         indices.add_event_handler(follow)
         # cancel_awaiting: a drag only fetches the latest frame, like the widget's own slider
@@ -427,7 +401,7 @@ class TracePlot:
             if io.key_alt:
                 x_flags |= implot.AxisFlags_.lock
             y_flags = implot.AxisFlags_.lock if io.key_shift else implot.AxisFlags_.none
-            x_label = ("time" if self._use_time else "frame") if last else ""
+            x_label = (self._time_label if self._use_time else "frame") if last else ""
             implot.setup_axes(x_label, name, x_flags, y_flags)
             # above the plot, so a panel with a legend keeps the same width as the others
             implot.setup_legend(implot.Location_.north, implot.LegendFlags_.outside | implot.LegendFlags_.horizontal)
@@ -463,7 +437,7 @@ class TracePlot:
             if held:
                 self._held = True
             if moved:
-                self.frame = _nearest(xs, at)
+                self.frame = nearest_frame(xs, at)
                 return self.frame
         finally:
             implot.end_plot()

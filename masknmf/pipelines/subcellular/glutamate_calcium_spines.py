@@ -115,6 +115,8 @@ class GlutamateCalciumSpinePipeline(BasePipeline):
             exclude_initial_frames: int = 200,
             good_frames: torch.Tensor | np.ndarray | None = None,
             compute_raw_correlation: bool = False,
+            glutamate_pixel_mask: np.ndarray | None = None,
+            calcium_pixel_mask: np.ndarray | None = None,
             stop_after: Literal["registration", "compression", "demixing"] = "demixing",
             resume: str | Path | None = None) -> Path:
         """
@@ -133,6 +135,10 @@ class GlutamateCalciumSpinePipeline(BasePipeline):
                 with zeros at the bad frames so they keep the raw frame count. The results file's OphysArray group holds this indicator
             compute_raw_correlation (bool): also store raw_residual_correlation_image, the local correlation
                 image of the registered movie minus the raw-scale signals and background. Skipped when the run has no movie
+            glutamate_pixel_mask (np.ndarray | None): Boolean (height, width), True on the pixels to use. The rest
+                of the glutamate channel are zeroed before compression, on top of the automatic SD mask; masknmf mask
+                draws one
+            calcium_pixel_mask (np.ndarray | None): The same for the calcium channel
             stop_after: the last stage to run: "registration" ends once both channels' shifts are written,
                 "compression" once their compressions are, "demixing" runs everything. A demixing_config "skip" ends
                 the run after compression too; a motion_correct_config "skip" compresses the channels as recorded
@@ -296,13 +302,19 @@ class GlutamateCalciumSpinePipeline(BasePipeline):
                 with h5py.File(results_paths[name], "a") as f:
                     f["cross_channel_mask"] = cross_channel_mask
 
+        for name, pixel_mask in (("glutamate_pixel_mask", glutamate_pixel_mask), ("calcium_pixel_mask", calcium_pixel_mask)):
+            if pixel_mask is not None and pixel_mask.shape != cross_channel_mask.shape:
+                raise ValueError(f"{name} has shape {pixel_mask.shape}; the movie's frames are {cross_channel_mask.shape}")
+
         if glu_moco_array_dense is not None:
-            glu_video =  glu_moco_array_dense * cross_channel_mask.astype(np.float32)[None, :, :]
+            glu_mask = cross_channel_mask if glutamate_pixel_mask is None else cross_channel_mask * glutamate_pixel_mask
+            glu_video =  glu_moco_array_dense * glu_mask.astype(np.float32)[None, :, :]
         else:
             glu_video = None
 
         if calcium_moco_array_dense is not None:
-            calcium_video = calcium_moco_array_dense * cross_channel_mask.astype(np.float32)[None, :, :]
+            calcium_mask = cross_channel_mask if calcium_pixel_mask is None else cross_channel_mask * calcium_pixel_mask
+            calcium_video = calcium_moco_array_dense * calcium_mask.astype(np.float32)[None, :, :]
         else:
             calcium_video = None
 
