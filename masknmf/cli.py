@@ -749,7 +749,7 @@ def view_tracking(args: argparse.Namespace, source: Path) -> None:
     device = str(masknmf.utils.torch_select_device()) if args.device == "auto" else args.device
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        masknmf.MultiSessionDemixingVis(tracking, device=device).show()
+        masknmf.MultiSessionDemixingVis(tracking, figure_shape=args.panels, device=device).show()
     fpl.loop.run()
 
 
@@ -1250,6 +1250,10 @@ def build_parser(spec: Optional[scraper.PipelineSpec], command: Optional[str] = 
     )
     parser_view.add_argument(
         "--list", action="store_true", help="print what the file holds and exit"
+    )
+    parser_view.add_argument(
+        "--panels", default=None, type=int, nargs=2, metavar=("ROWS", "COLS"),
+        help="multisession viewer: the grid of session panels; default one row of up to three",
     )
     parser_view.set_defaults(handler=command_view)
 

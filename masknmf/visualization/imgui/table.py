@@ -24,6 +24,7 @@ class RoiOrder:
         self.range_column: Optional[str] = None
         self.range_span = (0, 0)
         self.range_limits = (0, 0)
+        self.keep: Optional[np.ndarray] = None  # one bool per item: a filter of the caller's own
         self.sort_by: Optional[str] = None
         self.ascending = True
         self.order = np.arange(n_items)
@@ -50,6 +51,8 @@ class RoiOrder:
         if self.range_column is not None:
             values = self.columns[self.range_column]
             mask &= (values >= self.range_limits[0]) & (values <= self.range_limits[1])
+        if self.keep is not None:
+            mask &= self.keep
         idx = np.flatnonzero(mask)
         if self.sort_by is not None:
             key = self.columns[self.sort_by][idx]
