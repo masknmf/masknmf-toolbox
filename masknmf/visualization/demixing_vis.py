@@ -112,7 +112,7 @@ class SingleSessionDemixingVis:
     Footprints show as feathered masks and/or contours over the summary image: a mask pixel's opacity is its
     weight times the signal's peak, against one maximum over the field, so a weak signal draws faint (the
     weighting switch scales every mask to its own peak instead), and the halo under a tenth of a footprint's
-    own peak is left out. A contour is the smoothed outline of the pixels its mask fills, in the mask's color.
+    own peak is left out. A contour is the outline of the pixels its mask fills, in the mask's color.
 
     With ``results_path`` set, "Demix" runs the drawn ROIs, the signals marked with "Delete" and the groups marked
     with "Merge" through the

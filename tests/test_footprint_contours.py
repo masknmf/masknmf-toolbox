@@ -91,7 +91,16 @@ def test_outline_has_a_closed_loop_per_piece_and_per_hole(seed):
     assert all((loop[0] == loop[-1]).all() for loop in loops)
 
 
-def test_outline_of_a_disc_is_smooth_and_on_its_edge():
+def test_outline_follows_the_pixel_edges_by_default():
+    mask = disc(radius=6)
+    (loop,) = loops_of(outline(*np.nonzero(mask)))
+    assert turning(loop) > 4 * np.pi
+    exact = edge_midpoints(mask)
+    np.testing.assert_allclose(np.linalg.norm(exact[:, None] - loop[None], axis=-1).min(axis=1), 0, atol=1e-6)
+
+
+def test_smoothed_outline_of_a_disc_is_smooth_and_on_its_edge(monkeypatch):
+    monkeypatch.setattr("masknmf.visualization.rois.CONTOUR_SMOOTHING", 1.5)
     mask = disc(radius=6)
     (loop,) = loops_of(outline(*np.nonzero(mask)))
     exact = edge_midpoints(mask)

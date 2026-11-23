@@ -29,8 +29,9 @@ SELECTED_ALPHA = 0.9
 MARKED_COLOR = (1.0, 0.15, 0.15)  # footprints marked for deletion
 # fraction of a footprint's own peak weight below which the masks and the contours drop its pixels: the halo
 MASK_CUTOFF = 0.1
-# vertices, which lie about a pixel apart: sigma of the Gaussian a contour is smoothed with along its length
-CONTOUR_SMOOTHING = 1.5
+# vertices, which lie about a pixel apart: sigma of the Gaussian a contour is smoothed with along its length.
+# 0, the default, is off: a contour follows the pixel edges; 1.5 rounds the pixel steps
+CONTOUR_SMOOTHING = 0.0
 # screen px; the highlighted contours are the wider, so they read over the others crossing them
 CONTOUR_THICKNESS = (1.0, 2.0)
 # z of the contour lines: over the mask overlay at 0.5, the highlighted over the others
@@ -142,11 +143,11 @@ def _smooth(loop: np.ndarray) -> np.ndarray:
 
 def outline(ypix: np.ndarray, xpix: np.ndarray) -> np.ndarray:
     """
-    The smoothed closed loops around a set of pixels.
+    The closed loops around a set of pixels, smoothed when CONTOUR_SMOOTHING is set.
 
     Marching squares at one half traces the pixels' outer edges. Diagonal neighbors join, which keeps a one pixel
-    wide process in one loop, and a hole or a detached piece gets a loop of its own. Each loop is then smoothed
-    along its length, which rounds the pixel steps and neither merges nor drops a loop.
+    wide process in one loop, and a hole or a detached piece gets a loop of its own. With CONTOUR_SMOOTHING
+    over 0 each loop is then smoothed along its length, which rounds the pixel steps and neither merges nor drops a loop.
 
     Args:
         ypix (np.ndarray): rows of the pixels
