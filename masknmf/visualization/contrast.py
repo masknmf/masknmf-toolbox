@@ -16,6 +16,7 @@ import numpy as np
 VMIN_FIXED = -0.05
 VMAX_FIXED = 1.0
 NUM_FRAMES_SAMPLED = 16
+PERCENTILES_FIT = (0.1, 99.9)
 # a colorbar spans these percentiles of the sampled frames: the few pixels beyond them would take most of the bar
 # (KG263 F01 background: 99.98% of values within -0.04 to 0.03, extremes at -0.12 and 0.09)
 PERCENTILES_REACH = (0.01, 99.99)
@@ -41,24 +42,29 @@ def sample_frames(data) -> np.ndarray:
     return frames[has_values] if has_values.any() else frames[:1]
 
 
-def fit_sampled_percentiles(frames: np.ndarray, percentiles: tuple[float, float]) -> tuple[float, float]:
+def fit_pooled_percentiles(frames: np.ndarray, percentiles: tuple[float, float] = PERCENTILES_FIT) -> tuple[float, float]:
     """
-    The median over ``frames`` of each frame's two ``percentiles``, so one atypical frame does not move the limits.
+    The two ``percentiles`` of the nonzero pixels of ``frames``, pooled over the frames.
+
+    Pixels outside a masked field of view and outside every footprint are exactly 0 (76-91% of a spine recording's
+    demixed movies), so a percentile over all pixels would be a percentile of the mask.
 
     Parameters
     ----------
     frames : np.ndarray
         Frames from ``sample_frames``. Shape (sampled, height, width[, channels]).
     percentiles : tuple[float, float]
-        Low and high percentile of a frame, 0 to 100.
+        Low and high percentile, 0 to 100.
 
     Returns
     -------
     tuple[float, float]
-        vmin, vmax; vmax is vmin + 1 when the two are equal.
+        vmin, vmax; vmax is vmin + 1 when the two are equal. 0, 1 when no pixel is nonzero.
     """
-    per_frame = np.nanpercentile(frames.reshape(len(frames), -1), percentiles, axis=1)  ## (2, sampled)
-    vmin, vmax = (float(value) for value in np.median(per_frame, axis=1))
+    values = frames[np.isfinite(frames) & (frames != 0)]
+    if values.size == 0:
+        return 0.0, 1.0
+    vmin, vmax = (float(value) for value in np.percentile(values, percentiles))
     return vmin, (vmax if vmax > vmin else vmin + 1.0)
 
 
@@ -70,13 +76,11 @@ def contrast_fixed(graphic) -> None:
 
 def contrast_sampled(graphic) -> None:
     """
-    Sets the limits to the median, over the frames of ``sample_frames``, of each frame's 0.5 and 99.5 percentiles:
+    Sets the limits to the 0.1 and 99.9 percentiles of the nonzero pixels of the frames of ``sample_frames``:
     limits in the movie's own units, whether it holds counts in the thousands or dF/F of a few percent.
     """
     graphic.compute_histogram = False
-    graphic.graphic.vmin, graphic.graphic.vmax = fit_sampled_percentiles(
-        frames=sample_frames(data=graphic.data), percentiles=(0.5, 99.5)
-    )
+    graphic.graphic.vmin, graphic.graphic.vmax = fit_pooled_percentiles(frames=sample_frames(data=graphic.data))
 
 
 def contrast_fastplotlib(graphic) -> None:
@@ -91,17 +95,6 @@ def contrast_first_frame(graphic) -> None:
     graphic.compute_histogram = False
     frame = graphic.data[0]
     graphic.graphic.vmin, graphic.graphic.vmax = float(np.nanmin(frame)), float(np.nanmax(frame))
-
-
-def contrast_sampled_percentiles(graphic) -> None:
-    """
-    Sets the limits to the median, over the frames of ``sample_frames``, of each frame's 0.1 and 99.9 percentiles.
-    One atypical frame, such as one in the motion transient at the start of a recording, does not move them.
-    """
-    graphic.compute_histogram = False
-    graphic.graphic.vmin, graphic.graphic.vmax = fit_sampled_percentiles(
-        frames=sample_frames(data=graphic.data), percentiles=(0.1, 99.9)
-    )
 
 
 def histogram_sampled(frames: np.ndarray, vmin: float, vmax: float) -> tuple[np.ndarray, np.ndarray]:
@@ -134,6 +127,5 @@ CONTRAST_METHODS = {
     "first-frame": contrast_first_frame,
 }
 
-# the background is about +/-0.02 where the signals reach 3, so the fixed limits show it flat; it keeps the wider
-# percentiles it had before sampled became the default
-CONTRAST_BY_MOVIE = {"background": contrast_sampled_percentiles}
+# the background is about +/-0.02 where the signals reach 3, so the fixed limits show it flat
+CONTRAST_BY_MOVIE = {"background": contrast_sampled}

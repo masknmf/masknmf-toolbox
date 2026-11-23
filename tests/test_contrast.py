@@ -7,7 +7,7 @@ import pytest
 from fastplotlib.widgets.nd_widget._async import run_sync
 from rendercanvas.offscreen import RenderCanvas
 
-from masknmf.visualization.contrast import CONTRAST_BY_MOVIE, CONTRAST_METHODS, VMAX_FIXED, VMIN_FIXED, histogram_sampled, sample_frames
+from masknmf.visualization.contrast import CONTRAST_BY_MOVIE, CONTRAST_METHODS, VMAX_FIXED, VMIN_FIXED, fit_pooled_percentiles, histogram_sampled, sample_frames
 
 NUM_FRAMES = 20
 
@@ -74,12 +74,12 @@ def test_first_frame_fits_the_first_frame_whatever_frame_is_on_show():
 def test_the_background_fits_frames_across_the_movie_and_ignores_one_atypical_frame_on_show(monkeypatch):
     monkeypatch.setattr(fastplotlib.graphics.image, "quick_min_max", refuse_to_compute)
     movie = make_movie()
-    movie[0] += 1000
+    # frame 4 is not among the 16 sampled of 20
+    movie[4] += 1000
     widget, graphic, _ = make_panel(movie=movie)
-    show_frame(widget=widget, graphic=graphic, index=0)
+    show_frame(widget=widget, graphic=graphic, index=4)
     CONTRAST_BY_MOVIE["background"](graphic)
-    # frames t span [t, t + 1); the median frame of the 16 sampled is between frames 10 and 11
-    assert 10 < graphic.graphic.vmin < graphic.graphic.vmax < 12
+    assert 0 < graphic.graphic.vmin < 1 and NUM_FRAMES - 1 < graphic.graphic.vmax < NUM_FRAMES
     assert graphic.histogram_widget is None
 
 
@@ -99,7 +99,7 @@ def test_the_background_fit_ignores_zero_frames():
     widget, graphic, _ = make_panel(movie=movie)
     show_frame(widget=widget, graphic=graphic, index=0)
     CONTRAST_BY_MOVIE["background"](graphic)
-    assert 12 < graphic.graphic.vmin < graphic.graphic.vmax < NUM_FRAMES
+    assert 12 < graphic.graphic.vmin < 14 and NUM_FRAMES - 1 < graphic.graphic.vmax < NUM_FRAMES
 
 
 def test_the_sampled_histogram_spans_the_movie_and_the_limits_whatever_frame_is_on_show():
@@ -116,6 +116,14 @@ def test_sampled_fits_frames_across_the_movie_in_its_own_units():
     widget, graphic, _ = make_panel(movie=make_movie(offset=5000.0))
     show_frame(widget=widget, graphic=graphic, index=0)
     CONTRAST_METHODS["sampled"](graphic)
-    assert 5000 + 8 < graphic.graphic.vmin < graphic.graphic.vmax < 5000 + 12
+    assert 5000 < graphic.graphic.vmin < 5001 and 5000 + NUM_FRAMES - 1 < graphic.graphic.vmax < 5000 + NUM_FRAMES
     assert graphic.histogram_widget is None
     assert next(iter(CONTRAST_METHODS)) == "sampled"
+
+
+def test_the_pooled_fit_leaves_out_the_zero_pixels_of_a_masked_field_of_view():
+    movie = make_movie(offset=5.0)
+    movie[:, :, 4:] = 0
+    vmin, vmax = fit_pooled_percentiles(frames=sample_frames(data=movie))
+    assert 5 < vmin < 6 and NUM_FRAMES + 4 < vmax < NUM_FRAMES + 5
+    assert fit_pooled_percentiles(frames=np.zeros((2, 4, 4), dtype=np.float32)) == (0.0, 1.0)

@@ -1221,10 +1221,11 @@ def build_parser(spec: Optional[scraper.PipelineSpec], command: Optional[str] = 
     parser_view.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     parser_view.add_argument(
         "--contrast", default="sampled", choices=list(masknmf.visualization.contrast.CONTRAST_METHODS),
-        help="how each panel fits its color limits: sampled takes the 0.5-99.5 percentiles of 16 frames spread across "
+        help="how each panel fits its color limits: sampled takes the 0.1-99.9 percentiles of the nonzero "
+        "pixels of 16 frames spread across "
         "the movie, fixed opens it at vmin -0.05, vmax 1.0 without reading the movie, "
         "fastplotlib samples frames across the movie for a colorbar, first-frame takes the first frame's range; "
-        "the background always fits the 0.1-99.9 percentiles of frames sampled across the movie",
+        "the background always takes the sampled fit",
     )
     parser_view.add_argument(
         "--compression",
@@ -1267,10 +1268,11 @@ def build_parser(spec: Optional[scraper.PipelineSpec], command: Optional[str] = 
     parser_serve.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     parser_serve.add_argument(
         "--contrast", default="sampled", choices=list(masknmf.visualization.contrast.CONTRAST_METHODS),
-        help="how each panel fits its color limits: sampled takes the 0.5-99.5 percentiles of 16 frames spread across "
+        help="how each panel fits its color limits: sampled takes the 0.1-99.9 percentiles of the nonzero "
+        "pixels of 16 frames spread across "
         "the movie, fixed opens it at vmin -0.05, vmax 1.0 without reading the movie, "
         "fastplotlib samples frames across the movie for a colorbar, first-frame takes the first frame's range; "
-        "the background always fits the 0.1-99.9 percentiles of frames sampled across the movie",
+        "the background always takes the sampled fit",
     )
     parser_serve.add_argument("--host", default="127.0.0.1", help="interface to listen on; there is no login, so keep localhost and tunnel")
     parser_serve.add_argument("--port", default=PORT_SERVE, type=int)

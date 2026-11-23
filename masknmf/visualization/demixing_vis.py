@@ -178,9 +178,9 @@ class SingleSessionDemixingVis:
     ``panel_names`` maps any of those names to the one shown in its place (panel title, Panels matrix,
     right-click menu). ``canvas`` is the rendercanvas the figure draws on; None opens a window. ``contrast`` names
     how each panel fits its color limits, a key of :data:`masknmf.visualization.contrast.CONTRAST_METHODS`; the
-    default, sampled, takes the median, over 16 frames spread across the movie, of each frame's 0.5 and 99.5
-    percentiles; fixed opens every panel at vmin -0.05, vmax 1.0 without reading the movie. The background always
-    takes the 0.1 and 99.9 percentiles of the sampled frames. A colorbar at each panel's right edge drags its
+    default, sampled, takes the 0.1 and 99.9 percentiles of the nonzero pixels of 16 frames spread across the
+    movie; fixed opens every panel at vmin -0.05, vmax 1.0 without reading the movie. The background always
+    takes the sampled fit. A colorbar at each panel's right edge drags its
     limits, past the ends of its axis too.
     The time slider runs in ``frame_timings``' unit, ``time_unit`` (shown on the traces' time axis), and each panel
     shows the frame nearest it; without ``frame_timings`` it runs over frame numbers.
