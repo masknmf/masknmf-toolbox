@@ -57,7 +57,7 @@ from masknmf.visualization.imgui.run_record import RECORD_LABEL, RECORD_TIP, dra
 from masknmf.visualization.imgui.scale import scale_figure
 from masknmf.visualization.rois import MARKED_COLOR, SELECTED_ALPHA, FootprintContours, FootprintSet
 from masknmf.visualization.summary_widget import SummaryImageViewer
-from masknmf.visualization.contrast import CONTRAST_BY_MOVIE, CONTRAST_METHODS, VMAX_FIXED, VMIN_FIXED, histogram_on_show
+from masknmf.visualization.contrast import CONTRAST_BY_MOVIE, CONTRAST_METHODS, VMAX_FIXED, VMIN_FIXED, histogram_sampled, sample_frames
 from masknmf.demixing import CellStats, estimate_temporal_demixed_raw, update_signals, write_curated
 from masknmf.diagnostics import pmd_autocovariance_diagnostics
 from masknmf.pipelines.configs.demixing_configs import NMFConfig
@@ -686,7 +686,8 @@ class SingleSessionDemixingVis:
     def _fit_panel(self, panel: str):
         """
         Fit ``panel``'s color limits by its movie's method in CONTRAST_BY_MOVIE, else the viewer's contrast method. When
-        fastplotlib docks no colorbar, dock one over a histogram of the frame on show, so the limits can be dragged.
+        fastplotlib docks no colorbar, dock one over a histogram of frames spread across the movie, so the limits can be
+        dragged over every value those frames take.
         """
         graphic = self._panel_graphics[panel]
         CONTRAST_BY_MOVIE.get(self._panels[panel].current, self._fit_contrast)(graphic)
@@ -694,12 +695,14 @@ class SingleSessionDemixingVis:
             # fastplotlib's colorbar took the right edge
             self._colorbars.pop(panel, None)
             return
+        image = graphic.graphic
+        histogram = histogram_sampled(frames=sample_frames(data=graphic.data), vmin=image.vmin, vmax=image.vmax)
         if panel in self._colorbars:
             # NOTE: NDImage.data= replaces the graphic, so the colorbar is rebound on every fit
-            self._colorbars[panel].graphics = graphic.graphic
-            self._colorbars[panel].histogram = histogram_on_show(graphic.graphic)
+            self._colorbars[panel].graphics = image
+            self._colorbars[panel].histogram = histogram
         else:
-            self._colorbars[panel] = fpl.ui.ImguiColorbar(graphics=graphic.graphic, histogram=histogram_on_show(graphic.graphic))
+            self._colorbars[panel] = fpl.ui.ImguiColorbar(graphics=image, histogram=histogram)
             self._ndw_fov.figure[panel].add_imgui_window(self._colorbars[panel], location="right", size=100)
 
     def _bind_click_handlers(self):

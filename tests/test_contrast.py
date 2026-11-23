@@ -7,7 +7,7 @@ import pytest
 from fastplotlib.widgets.nd_widget._async import run_sync
 from rendercanvas.offscreen import RenderCanvas
 
-from masknmf.visualization.contrast import CONTRAST_BY_MOVIE, CONTRAST_METHODS, VMAX_FIXED, VMIN_FIXED, histogram_on_show
+from masknmf.visualization.contrast import CONTRAST_BY_MOVIE, CONTRAST_METHODS, VMAX_FIXED, VMIN_FIXED, histogram_sampled, sample_frames
 
 NUM_FRAMES = 20
 
@@ -83,9 +83,30 @@ def test_the_background_fits_frames_across_the_movie_and_ignores_one_atypical_fr
     assert graphic.histogram_widget is None
 
 
-def test_the_histogram_of_the_frame_on_show_spans_the_frame_and_the_limits():
-    widget, graphic, movie = make_panel()
-    show_frame(widget=widget, graphic=graphic, index=10)
-    counts, edges = histogram_on_show(graphic.graphic)
-    assert counts.sum() == movie[10].size
-    assert (edges[0], edges[-1]) == pytest.approx((VMIN_FIXED, movie[10].max()))
+def test_sampled_frames_leave_out_the_all_zero_frames_that_pad_a_cut_recording():
+    movie = make_movie()
+    movie[:5] = 0
+    movie[-1] = 0
+    frames = sample_frames(data=movie)
+    assert 0 < len(frames) < 16
+    assert frames.reshape(len(frames), -1).any(axis=1).all()
+    assert len(sample_frames(data=np.zeros_like(movie))) == 1
+
+
+def test_the_background_fit_ignores_zero_frames():
+    movie = make_movie()
+    movie[:12] = 0
+    widget, graphic, _ = make_panel(movie=movie)
+    show_frame(widget=widget, graphic=graphic, index=0)
+    CONTRAST_BY_MOVIE["background"](graphic)
+    assert 12 < graphic.graphic.vmin < graphic.graphic.vmax < NUM_FRAMES
+
+
+def test_the_sampled_histogram_spans_the_movie_and_the_limits_whatever_frame_is_on_show():
+    movie = make_movie()
+    movie[0] = 0
+    frames = sample_frames(data=movie)
+    counts, edges = histogram_sampled(frames=frames, vmin=VMIN_FIXED, vmax=VMAX_FIXED)
+    assert edges[0] == pytest.approx(VMIN_FIXED)
+    assert NUM_FRAMES - 1 < edges[-1] <= movie.max()
+    assert counts.sum() > 0.999 * frames.size
