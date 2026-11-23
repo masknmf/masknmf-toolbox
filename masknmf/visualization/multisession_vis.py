@@ -38,6 +38,7 @@ from masknmf.visualization.imgui import (
     section,
     tooltip,
 )
+from masknmf.visualization.imgui.colorbar import ReachColorbar
 from masknmf.visualization.contrast import fit_sampled_percentiles, histogram_sampled, sample_frames
 from masknmf.visualization.imgui.keybinds import MULTISESSION, pressed
 from masknmf.visualization.imgui.options import draw_options_menu, draw_options_popup
@@ -631,7 +632,7 @@ class MultiSessionDemixingVis:
         Re-slice panel k now, with the color limits and colorbar of what it shows. Limits are fit once per session
         and movie, on frames spread across it (contrast.sample_frames): the tracked signals to the median frame's
         minimum and maximum, a movie to the median frame's 0.5 and 99.5 percentiles. Limits dragged on the colorbar
-        are kept for as long as the viewer is open.
+        are kept for as long as the viewer is open; the colorbar's "Reset to fit" brings the fit back.
         """
         graphic = self._nd_image_graphics[k]
         image = graphic.graphic
@@ -642,15 +643,16 @@ class MultiSessionDemixingVis:
         shown = (self._panel_session[k], self._panels[name].current)
         if shown not in self._contrast:
             frames = self._slice_thread.submit(sample_frames, self._panels[name]).result()
-            limits = fit_sampled_percentiles(frames=frames, percentiles=(0, 100) if shown[1] == "signals" else (0.5, 99.5))
-            self._contrast[shown] = {"limits": limits, "histogram": histogram_sampled(frames, *limits)}
-        self._panel_shown[k] = shown
-        image.vmin, image.vmax = self._contrast[shown]["limits"]
-        if k in self._colorbars:
-            self._colorbars[k].histogram = self._contrast[shown]["histogram"]
-        else:
-            self._colorbars[k] = fpl.ui.ImguiColorbar(graphics=image, histogram=self._contrast[shown]["histogram"])
+            fit = fit_sampled_percentiles(frames=frames, percentiles=(0, 100) if shown[1] == "signals" else (0.5, 99.5))
+            self._contrast[shown] = {"limits": fit, "fit": fit, "histogram": histogram_sampled(frames, *fit)}
+        contrast = self._contrast[shown]
+        image.vmin, image.vmax = contrast["limits"]
+        if k not in self._colorbars:
+            self._colorbars[k] = ReachColorbar(graphics=image, histogram=contrast["histogram"], limits=contrast["fit"])
             self._ndw.figure[name].add_imgui_window(self._colorbars[k], location="right", size=100)
+        elif shown != self._panel_shown[k]:
+            self._colorbars[k].set_fit(histogram=contrast["histogram"], limits=contrast["fit"])
+        self._panel_shown[k] = shown
 
     def _row_colors(self) -> np.ndarray:
         """(clusters displayed, 3) rgb per cluster row under the current color-by."""
