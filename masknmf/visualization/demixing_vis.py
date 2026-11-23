@@ -114,19 +114,21 @@ class SingleSessionDemixingVis:
     weighting switch scales every mask to its own peak instead), and the halo under a tenth of a footprint's
     own peak is left out. A contour is the smoothed outline of the pixels its mask fills, in the mask's color.
 
-    With ``results_path`` set, "Demix" runs the drawn ROIs and the signals marked with "Delete" through the
+    With ``results_path`` set, "Demix" runs the drawn ROIs, the signals marked with "Delete" and the groups marked
+    with "Merge" through the
     demixer's NMF pass (``nmf_config``; when None, the pipeline defaults with "filter dim rois" starting at the
     min brightness of the pass that produced the results, read from the config.json beside them or from a curated
     file's own record) and writes the outcome to a new
     ``<stem>.<timestamp>.curated.hdf5`` beside the file (``results.hdf5 -> results.<timestamp>.curated.hdf5``),
-    never over it: drawn ROIs become ordinary signals, marked signals are gone, the new file's description says
+    never over it: drawn ROIs become ordinary signals, marked signals are gone, each merge group is one signal
+    (after the others, its rank-1 fit refit by the pass), the new file's description says
     what was done, and the viewer moves on to it so further passes chain.
 
     The "Signals" tab lists every demixed signal; ctrl / shift select a group whose traces share the plot.
     "Merge" (g) marks the group to merge: its signals draw as one mask and one contour, the pixels any of them
-    fills, and a click on it or on one of their table rows selects them all; again unmarks. The mark is visual
-    only: the signals, their traces and table rows stay, Demix does not merge them, and ``merge_groups`` lists
-    the groups.
+    fills, and a click on it or on one of their table rows selects them all; again unmarks. Until the next
+    Demix the mark only changes the picture: the signals, their traces and table rows stay. ``merge_groups``
+    lists the groups.
     Traces plot only with the Curation tab's "show selected traces" on (off by default): selecting then only
     highlights, however big the selection.
     Clicking the selected mask or its table row again deselects it; a pan or drag on a panel leaves the
@@ -782,9 +784,10 @@ class SingleSessionDemixingVis:
 
     def demix(self):
         """
-        Run the drawn ROIs (appended) and the marked signals (removed) through the demixer's NMF pass and
-        write the outcome to a new curated file beside the results. Runs on a thread; the viewer reloads
-        from the new file when it finishes.
+        Run the drawn ROIs (appended), the marked signals (removed) and the merge groups (each one signal, after
+        the others) through the demixer's NMF pass and write the outcome to a new curated file beside the results.
+        A marked signal leaves its merge group. Runs on a thread; the viewer reloads from the new file when it
+        finishes.
         """
         if self._ac_array is None or self._results_path is None:
             raise ValueError(
@@ -792,20 +795,21 @@ class SingleSessionDemixingVis:
             )
         masks = self.roi_masks
         drop = sorted(self._marked)
-        if masks.shape[-1] == 0 and not drop:
-            raise ValueError("no rois drawn and no signals marked for deletion")
+        merges = [kept for group in self.merge_groups if len(kept := [k for k in group if k not in self._marked]) > 1]
+        if masks.shape[-1] == 0 and not drop and not merges:
+            raise ValueError("no rois drawn, no signals marked for deletion and none to merge")
         if self._worker is not None:
             raise RuntimeError("a demixing pass is already running")
         # each recorded filter minus any of its signals unmarked since
         filters = [dict(kept, signals=kept["signals"] & set(drop)) for kept in self._filters]
         filters = [kept for kept in filters if kept["signals"]]
-        self._status = f"demixing: +{masks.shape[-1]} roi(s), -{len(drop)} signal(s)..."
+        self._status = f"demixing: +{masks.shape[-1]} roi(s), -{len(drop)} signal(s), {len(merges)} merge(s)..."
         self._worker = threading.Thread(
-            target=self._demix, args=(masks, drop, filters), daemon=True
+            target=self._demix, args=(masks, drop, merges, filters), daemon=True
         )
         self._worker.start()
 
-    def _demix(self, masks: np.ndarray, drop: list, filters: list):
+    def _demix(self, masks: np.ndarray, drop: list, merges: list, filters: list):
         try:
             results = update_signals(
                 self.demixing_results,
@@ -813,7 +817,8 @@ class SingleSessionDemixingVis:
                 drop,
                 self._nmf_config,
                 device=self.device,
-                frame_batch_size=self.frame_batch_size
+                frame_batch_size=self.frame_batch_size,
+                merge_indices=merges,
             )
             # the movie the demixing came from: the registered one, or the raw one when there was no registration
             movie = self._opened.registered
@@ -822,7 +827,7 @@ class SingleSessionDemixingVis:
             results.temporal_demixed_raw = estimate_temporal_demixed_raw(
                 results, movie, device=self.device, nonneg=True, frame_batch_size=self.frame_batch_size
             )
-            path = write_curated(self._results_path, results, drop, masks.shape[-1], filters, nmf_config=self._nmf_config)
+            path = write_curated(self._results_path, results, drop, masks.shape[-1], filters, nmf_config=self._nmf_config, merges=merges)
             self._pending = (results, path)
         except Exception as e:
             self._pending = e
@@ -1433,7 +1438,7 @@ class SingleSessionDemixingVis:
     def mark_merges(self, groups, record: bool = True):
         """
         Mark ``groups`` of signals to merge, in place of the groups marked before: each draws as one mask and one
-        contour. The signals keep their traces and table rows, and Demix does not merge them yet.
+        contour. The signals keep their traces and table rows until the next Demix makes each group one signal.
 
         Args:
             groups: groups of signal indices, two or more in each and none in two groups
@@ -2186,7 +2191,7 @@ class SingleSessionDemixingVis:
             f"Unmerge: the {len(signals)} selected signal(s) draw as separate masks again ({key})"
             if unmerge
             else f"Merge: mark the {len(signals)} selected signal(s) to merge, drawn as one mask and one contour; "
-            f"it takes two or more, and Demix does not merge them yet ({key})"
+            f"it takes two or more, and the next Demix makes them one signal ({key})"
         )
         imgui.same_line(0, gap)
         imgui.begin_disabled(not self._rois)
@@ -2205,7 +2210,7 @@ class SingleSessionDemixingVis:
         section("DEMIX")
         g.row("run")
         imgui.begin_disabled(
-            (not self._rois and not self._marked)
+            (not self._rois and not self._marked and not self.merge_groups)
             or self._ac_array is None
             or not self._is_masknmf_result
             or self._results_path is None
@@ -2215,13 +2220,13 @@ class SingleSessionDemixingVis:
             self.demix()
         imgui.end_disabled()
         tooltip(
-            "Demix: add the drawn rois, remove the marked signals, write a new curated results file "
+            "Demix: add the drawn rois, remove the marked signals, merge the marked groups, write a new curated results file "
             "beside the original (kept)"
             if self._results_path is not None
             else "Demix needs the results opened with results_path"
         )
         imgui.same_line(0, g.gap)
-        right_aligned_text(f"{len(self._rois)} roi(s), {len(self._marked)} marked")
+        right_aligned_text(f"{len(self._rois)} roi(s), {len(self._marked)} marked, {len(self.merge_groups)} merge(s)")
         g.row("options")
         changed, filter_dim = imgui.checkbox(
             "filter dim rois", self._nmf_config.min_brightness is not None

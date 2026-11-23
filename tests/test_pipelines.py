@@ -175,6 +175,17 @@ def test_a_curated_file_keeps_every_group_the_curated_results_do_not_write(tmp_p
     assert pipeline.resume_source(curated, reuse_compression=True)[0] == Path(curated).resolve()
 
 
+def test_a_curated_file_describes_the_signals_removed_and_the_groups_merged(tmp_path):
+    with h5py.File(tmp_path / "results.hdf5", "w") as file:
+        file.create_group(masknmf.DemixingResults.__name__)
+    curated = masknmf.demixing.write_curated(str(tmp_path / "results.hdf5"), StubResults(), drop=[4], merges=[[0, 2], [5, 6, 9]])
+    with h5py.File(curated) as file:
+        assert file.attrs["description"] == (
+            "Demixing results after curation: 1 signal(s) removed, 2 group(s) of signals merged (0 + 2; 5 + 6 + 9) "
+            "and 0 drawn roi(s) added, then a full NMF pass."
+        )
+
+
 def test_a_run_and_its_curated_file_store_the_compression_once(tmp_path, monkeypatch):
     # the test movie's arrays are smaller than the size save_dict links
     monkeypatch.setattr("masknmf.utils._serialization.NUM_BYTES_MIN_LINKED", 2**10)

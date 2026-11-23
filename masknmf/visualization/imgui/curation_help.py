@@ -202,7 +202,7 @@ TOOLS = (
     (
         "merge (g)",
         "mark the grouped signals to merge: they draw as one mask and one contour, and a click on it selects them "
-        "all; again unmarks. Demix does not merge them yet",
+        "all; again unmarks. The next Demix makes them one signal",
     ),
     ("center (f)", "every panel on the selected signal, following it as the selection moves"),
     (
@@ -602,7 +602,7 @@ def draw_curation_help(is_open: bool, keys_open: bool) -> tuple[bool, bool]:
     box(dl, x, y, 9 * em, bh, "results.hdf5", TEXT)
     x += 9 * em
     arrow(dl, x + 0.4 * em, x + 9.6 * em, y + bh / 2)
-    notes = (("+ drawn ROIs", SIGNAL, -1.3 * em), ("- marked signals", DROP, 0.3 * em))
+    notes = (("+ drawn ROIs", SIGNAL, -2.1 * em), ("- marked signals", DROP, -0.5 * em), ("merge groups", KEY, 1.1 * em))
     for text, color, dy in notes:
         size = imgui.calc_text_size(text)
         dl.add_text(imgui.ImVec2(x + (10 * em - size.x) / 2, y + bh / 2 + dy), u32(color), text)
