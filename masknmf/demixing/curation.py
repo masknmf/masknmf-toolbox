@@ -98,6 +98,7 @@ def write_curated(
     num_masks: int = 0,
     filters: Sequence[dict] = (),
     nmf_config=None,
+    merges: Sequence[Sequence[int]] = (),
 ) -> str:
     """
     Write ``results`` to a new ``<stem>.<timestamp>.curated.hdf5`` beside ``path``, the stem being the results
@@ -107,7 +108,7 @@ def write_curated(
     good frames, and a pipeline's other results. The new file's
     ``description`` attribute says what was done, and which range filter removed which signals: each of ``filters``
     has a ``column``, a ``range`` (lo, hi), ``outside`` (which side of the range it took) and the ``signals`` it
-    marked. ``nmf_config``, the NMFConfig (or its dict) the pass ran with, is kept in the new file's ``nmf_config``
+    marked, and which signals of ``merges`` (the groups merged) became one. ``nmf_config``, the NMFConfig (or its dict) the pass ran with, is kept in the new file's ``nmf_config``
     attribute as json, the way config.json writes it, so :func:`masknmf.io.read_nmf_config` finds the pass that
     produced the file's signals.
 
@@ -128,10 +129,12 @@ def write_curated(
         for flt in filters
         if flt["signals"]
     )
+    by_group = "; ".join(" + ".join(str(k) for k in group) for group in merges)
     with h5py.File(out, "a") as f:
         f.attrs["description"] = (
             f"Demixing results after curation: {len(drop)} signal(s) removed"
             + (f" ({by_filter})" if by_filter else "")
+            + (f", {len(merges)} group(s) of signals merged ({by_group})" if merges else "")
             + f" and {int(num_masks)} drawn roi(s) added, then a full NMF pass."
         )
         if nmf_config is not None:

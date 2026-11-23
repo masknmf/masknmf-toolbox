@@ -84,7 +84,7 @@ DEMIXING: Mapping[str, Bind] = {
     ),
     "merge": Bind(
         "g",
-        "mark the selected signals to merge: they draw as one mask and one contour (unmark when they already do)",
+        "mark the selected signals to merge: one mask and one contour, one signal after the next demix (unmark when they already are)",
         imgui.Key.g,
     ),
     "escape": Bind(
