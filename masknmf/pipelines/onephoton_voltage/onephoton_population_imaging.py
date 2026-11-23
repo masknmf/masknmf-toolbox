@@ -239,6 +239,7 @@ class OnePhotonCulturePipeline(BasePipeline):
             active_frames: np.ndarray | None = None,
             indicator_polarity: Literal["positive", "negative"] = "negative",
             good_frames: torch.Tensor | np.ndarray | list | None = None,
+            pixel_mask: np.ndarray | None = None,
             remove_intermediates: bool = False,
             compute_raw_correlation: bool = False,
             stop_after: Literal["registration", "compression", "demixing"] = "demixing",
@@ -255,7 +256,7 @@ class OnePhotonCulturePipeline(BasePipeline):
                         if there is an optogenetic stimulus
                     indicator_polarity (Literal["positive", "negative"]): Whether the indicator is positively or negatively tuned
                     good_frames (torch.Tensor | np.ndarray | None): An optional 1D vector indicating which frames are good vs. bad
-
+                    pixel_mask (np.ndarray | None): Boolean (height, width), True on the pixels to use. The rest are ignored by the registration and the compression's spatial basis; masknmf mask draws one
                     remove_intermediates (bool): drop the PMDArray group once demixing is done (the demixing
                         results carry the pmd)
                     compute_raw_correlation (bool): also store raw_residual_correlation_image, the local correlation
@@ -285,6 +286,10 @@ class OnePhotonCulturePipeline(BasePipeline):
             active = np.asarray(active_frames).astype(bool)
         if not active.size == int(data.shape[0]):
             raise ValueError("Active must be a 1D boolean vector whose length is equal to number of frames in the data")
+
+        if pixel_mask is not None and pixel_mask.shape != tuple(data.shape[1:]):
+            raise ValueError(f"pixel_mask has shape {pixel_mask.shape}; the movie's frames are {tuple(data.shape[1:])}")
+        pixel_weighting = None if pixel_mask is None else pixel_mask.astype("float")
 
         if good_frames is not None:
             good = torch.as_tensor(good_frames).cpu().numpy().astype(bool)
@@ -323,7 +328,7 @@ class OnePhotonCulturePipeline(BasePipeline):
         else:
             with self.step("motion correction"):
                 mean_img = torch.mean(mov[:min(self.motion_correct_config.num_frames_template, mov.shape[0])], dim=0)
-                corrector = GradientMotionCorrector(template=mean_img)
+                corrector = GradientMotionCorrector(template=mean_img, pixel_weighting=pixel_weighting)
                 moco_array = corrector.motion_correct(mov)
                 moco_array.output_device=torch.device('cpu')
                 moco_array.infill_bad_frames().export(results_path)
@@ -340,7 +345,7 @@ class OnePhotonCulturePipeline(BasePipeline):
             else:
                 frame_weighting = active_in_good.astype("float")
 
-            compress_strategy = self.compress_strategy(replace(self.compress_config, frame_weighting=frame_weighting))
+            compress_strategy = self.compress_strategy(replace(self.compress_config, frame_weighting=frame_weighting), pixel_weighting)
 
             compress_strategy.detrender = self.spline_detrender(moco_array.shape[0], frame_rate, window_seconds=0.05,
                                                                 knot_seconds=0.05, sigma_seconds=0.01)
