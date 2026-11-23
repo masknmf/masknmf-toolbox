@@ -38,6 +38,7 @@ from masknmf.visualization.imgui import (
     section,
     tooltip,
 )
+from masknmf.visualization.contrast import fit_sampled_percentiles, histogram_sampled, sample_frames
 from masknmf.visualization.imgui.keybinds import MULTISESSION, pressed
 from masknmf.visualization.imgui.options import draw_options_menu, draw_options_popup
 from masknmf.visualization.imgui.panels import KEYBINDS_LABEL, hint_button_width
@@ -313,8 +314,10 @@ class MultiSessionDemixingVis:
         self._color_contours()
 
         self._nd_image_graphics = []
-        self._signal_clims = {}
-        self._movie_clims = {}
+        # (session, movie) -> its color limits and the histogram its colorbar spans
+        self._contrast = {}
+        self._panel_shown = [None] * len(self._panel_names)  # per panel, the (session, movie) on show
+        self._colorbars = {}
         # frames are sliced on this one thread: torch keeps a pool of worker threads for every thread it computes on
         self._slice_thread = ThreadPoolExecutor(max_workers=1)
         for k, name in enumerate(self._panel_names):
@@ -625,25 +628,29 @@ class MultiSessionDemixingVis:
 
     def _refresh_panel(self, k: int):
         """
-        Re-slice panel k now, with the color limits of what it shows: the tracked signals' own, set the first time
-        its session's signals are shown, and for a movie its percentiles on the first frame it was shown at.
+        Re-slice panel k now, with the color limits and colorbar of what it shows. Limits are fit once per session
+        and movie, on frames spread across it (contrast.sample_frames): the tracked signals to the median frame's
+        minimum and maximum, a movie to the median frame's 0.5 and 99.5 percentiles. Limits dragged on the colorbar
+        are kept for as long as the viewer is open.
         """
         graphic = self._nd_image_graphics[k]
+        image = graphic.graphic
+        if self._panel_shown[k] in self._contrast:
+            self._contrast[self._panel_shown[k]]["limits"] = (image.vmin, image.vmax)
         self._slice_thread.submit(asyncio.run, graphic._set_indices_()).result()
-        j = self._panel_session[k]
-        current = self._panels[self._panel_names[k]].current
-        if current == "signals":
-            if j not in self._signal_clims:
-                graphic.graphic.reset_vmin_vmax()
-                self._signal_clims[j] = (graphic.graphic.vmin, graphic.graphic.vmax)
-            vmin, vmax = self._signal_clims[j]
+        name = self._panel_names[k]
+        shown = (self._panel_session[k], self._panels[name].current)
+        if shown not in self._contrast:
+            frames = self._slice_thread.submit(sample_frames, self._panels[name]).result()
+            limits = fit_sampled_percentiles(frames=frames, percentiles=(0, 100) if shown[1] == "signals" else (0.5, 99.5))
+            self._contrast[shown] = {"limits": limits, "histogram": histogram_sampled(frames, *limits)}
+        self._panel_shown[k] = shown
+        image.vmin, image.vmax = self._contrast[shown]["limits"]
+        if k in self._colorbars:
+            self._colorbars[k].histogram = self._contrast[shown]["histogram"]
         else:
-            if (j, current) not in self._movie_clims:
-                frame = np.asarray(graphic.graphic.data.value, dtype=np.float32)[..., 0]
-                lo, hi = np.percentile(frame, (0.5, 99.5))
-                self._movie_clims[(j, current)] = (float(lo), float(hi if hi > lo else lo + 1))
-            vmin, vmax = self._movie_clims[(j, current)]
-        graphic.graphic.vmin, graphic.graphic.vmax = vmin, vmax
+            self._colorbars[k] = fpl.ui.ImguiColorbar(graphics=image, histogram=self._contrast[shown]["histogram"])
+            self._ndw.figure[name].add_imgui_window(self._colorbars[k], location="right", size=100)
 
     def _row_colors(self) -> np.ndarray:
         """(clusters displayed, 3) rgb per cluster row under the current color-by."""
