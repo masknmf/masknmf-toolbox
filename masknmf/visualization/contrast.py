@@ -68,6 +68,17 @@ def contrast_fixed(graphic) -> None:
     graphic.graphic.vmin, graphic.graphic.vmax = VMIN_FIXED, VMAX_FIXED
 
 
+def contrast_sampled(graphic) -> None:
+    """
+    Sets the limits to the median, over the frames of ``sample_frames``, of each frame's 0.5 and 99.5 percentiles:
+    limits in the movie's own units, whether it holds counts in the thousands or dF/F of a few percent.
+    """
+    graphic.compute_histogram = False
+    graphic.graphic.vmin, graphic.graphic.vmax = fit_sampled_percentiles(
+        frames=sample_frames(data=graphic.data), percentiles=(0.5, 99.5)
+    )
+
+
 def contrast_fastplotlib(graphic) -> None:
     """Fits the limits to the frame on show and docks a colorbar over a histogram of frames sampled across the movie."""
     graphic.compute_histogram = True
@@ -117,11 +128,12 @@ def histogram_sampled(frames: np.ndarray, vmin: float, vmax: float) -> tuple[np.
 
 
 CONTRAST_METHODS = {
+    "sampled": contrast_sampled,
     "fixed": contrast_fixed,
     "fastplotlib": contrast_fastplotlib,
     "first-frame": contrast_first_frame,
 }
 
-# the background is about +/-0.02 where the signals reach 3, so the fixed limits show it flat; 16 of its frames
-# take 4 ms to make on a 16000-frame 2p recording
+# the background is about +/-0.02 where the signals reach 3, so the fixed limits show it flat; it keeps the wider
+# percentiles it had before sampled became the default
 CONTRAST_BY_MOVIE = {"background": contrast_sampled_percentiles}

@@ -57,6 +57,7 @@ from masknmf.visualization.imgui.run_record import RECORD_LABEL, RECORD_TIP, dra
 from masknmf.visualization.imgui.scale import scale_figure
 from masknmf.visualization.rois import MARKED_COLOR, SELECTED_ALPHA, FootprintContours, FootprintSet
 from masknmf.visualization.summary_widget import SummaryImageViewer
+from masknmf.visualization.imgui.colorbar import ReachColorbar
 from masknmf.visualization.contrast import CONTRAST_BY_MOVIE, CONTRAST_METHODS, VMAX_FIXED, VMIN_FIXED, histogram_sampled, sample_frames
 from masknmf.demixing import CellStats, estimate_temporal_demixed_raw, update_signals, write_curated
 from masknmf.diagnostics import pmd_autocovariance_diagnostics
@@ -177,9 +178,10 @@ class SingleSessionDemixingVis:
     ``panel_names`` maps any of those names to the one shown in its place (panel title, Panels matrix,
     right-click menu). ``canvas`` is the rendercanvas the figure draws on; None opens a window. ``contrast`` names
     how each panel fits its color limits, a key of :data:`masknmf.visualization.contrast.CONTRAST_METHODS`; the
-    default, fixed, opens every panel at vmin -0.05, vmax 1.0 without reading the movie. The background always
-    takes the median, over 16 frames spread across the movie, of each frame's 0.1 and 99.9 percentiles. A colorbar
-    at each panel's right edge drags its limits.
+    default, sampled, takes the median, over 16 frames spread across the movie, of each frame's 0.5 and 99.5
+    percentiles; fixed opens every panel at vmin -0.05, vmax 1.0 without reading the movie. The background always
+    takes the 0.1 and 99.9 percentiles of the sampled frames. A colorbar at each panel's right edge drags its
+    limits, past the ends of its axis too.
     The time slider runs in ``frame_timings``' unit, ``time_unit`` (shown on the traces' time axis), and each panel
     shows the frame nearest it; without ``frame_timings`` it runs over frame numbers.
 
@@ -225,7 +227,7 @@ class SingleSessionDemixingVis:
         frame_batch_size: int = 300,
         panel_names: dict[str, str] | None = None,
         canvas=None,
-        contrast: str = "fixed",
+        contrast: str = "sampled",
         time_unit: str | None = None,
     ):
         if contrast not in CONTRAST_METHODS:
@@ -687,7 +689,7 @@ class SingleSessionDemixingVis:
         """
         Fit ``panel``'s color limits by its movie's method in CONTRAST_BY_MOVIE, else the viewer's contrast method. When
         fastplotlib docks no colorbar, dock one over a histogram of frames spread across the movie, so the limits can be
-        dragged over every value those frames take.
+        dragged over the values those frames take and past them (ReachColorbar).
         """
         graphic = self._panel_graphics[panel]
         CONTRAST_BY_MOVIE.get(self._panels[panel].current, self._fit_contrast)(graphic)
@@ -697,12 +699,13 @@ class SingleSessionDemixingVis:
             return
         image = graphic.graphic
         histogram = histogram_sampled(frames=sample_frames(data=graphic.data), vmin=image.vmin, vmax=image.vmax)
+        limits = (image.vmin, image.vmax)
         if panel in self._colorbars:
             # NOTE: NDImage.data= replaces the graphic, so the colorbar is rebound on every fit
             self._colorbars[panel].graphics = image
-            self._colorbars[panel].histogram = histogram
+            self._colorbars[panel].set_fit(histogram=histogram, limits=limits)
         else:
-            self._colorbars[panel] = fpl.ui.ImguiColorbar(graphics=image, histogram=histogram)
+            self._colorbars[panel] = ReachColorbar(graphics=image, histogram=histogram, limits=limits)
             self._ndw_fov.figure[panel].add_imgui_window(self._colorbars[panel], location="right", size=100)
 
     def _bind_click_handlers(self):

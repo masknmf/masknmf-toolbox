@@ -110,3 +110,12 @@ def test_the_sampled_histogram_spans_the_movie_and_the_limits_whatever_frame_is_
     assert edges[0] == pytest.approx(VMIN_FIXED)
     assert NUM_FRAMES - 1 < edges[-1] <= movie.max()
     assert counts.sum() > 0.999 * frames.size
+
+
+def test_sampled_fits_frames_across_the_movie_in_its_own_units():
+    widget, graphic, _ = make_panel(movie=make_movie(offset=5000.0))
+    show_frame(widget=widget, graphic=graphic, index=0)
+    CONTRAST_METHODS["sampled"](graphic)
+    assert 5000 + 8 < graphic.graphic.vmin < graphic.graphic.vmax < 5000 + 12
+    assert graphic.histogram_widget is None
+    assert next(iter(CONTRAST_METHODS)) == "sampled"

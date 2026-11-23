@@ -1220,8 +1220,9 @@ def build_parser(spec: Optional[scraper.PipelineSpec], command: Optional[str] = 
     )
     parser_view.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     parser_view.add_argument(
-        "--contrast", default="fixed", choices=list(masknmf.visualization.contrast.CONTRAST_METHODS),
-        help="how each panel fits its color limits: fixed opens it at vmin -0.05, vmax 1.0 without reading the movie, "
+        "--contrast", default="sampled", choices=list(masknmf.visualization.contrast.CONTRAST_METHODS),
+        help="how each panel fits its color limits: sampled takes the 0.5-99.5 percentiles of 16 frames spread across "
+        "the movie, fixed opens it at vmin -0.05, vmax 1.0 without reading the movie, "
         "fastplotlib samples frames across the movie for a colorbar, first-frame takes the first frame's range; "
         "the background always fits the 0.1-99.9 percentiles of frames sampled across the movie",
     )
@@ -1265,8 +1266,9 @@ def build_parser(spec: Optional[scraper.PipelineSpec], command: Optional[str] = 
     parser_serve.add_argument("--prefix", default="", help="group the demixing results sit under, as for view")
     parser_serve.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     parser_serve.add_argument(
-        "--contrast", default="fixed", choices=list(masknmf.visualization.contrast.CONTRAST_METHODS),
-        help="how each panel fits its color limits: fixed opens it at vmin -0.05, vmax 1.0 without reading the movie, "
+        "--contrast", default="sampled", choices=list(masknmf.visualization.contrast.CONTRAST_METHODS),
+        help="how each panel fits its color limits: sampled takes the 0.5-99.5 percentiles of 16 frames spread across "
+        "the movie, fixed opens it at vmin -0.05, vmax 1.0 without reading the movie, "
         "fastplotlib samples frames across the movie for a colorbar, first-frame takes the first frame's range; "
         "the background always fits the 0.1-99.9 percentiles of frames sampled across the movie",
     )
