@@ -39,7 +39,7 @@ from masknmf.visualization.imgui import (
     tooltip,
 )
 from masknmf.visualization.imgui.colorbar import ReachColorbar
-from masknmf.visualization.contrast import PERCENTILES_FIT, fit_pooled_percentiles, histogram_sampled, sample_frames
+from masknmf.visualization.contrast import fit_limits, histogram_sampled, sample_frames
 from masknmf.visualization.imgui.keybinds import MULTISESSION, pressed
 from masknmf.visualization.imgui.options import draw_options_menu, draw_options_popup
 from masknmf.visualization.imgui.panels import KEYBINDS_LABEL, hint_button_width
@@ -630,8 +630,7 @@ class MultiSessionDemixingVis:
     def _refresh_panel(self, k: int):
         """
         Re-slice panel k now, with the color limits and colorbar of what it shows. Limits are fit once per session
-        and movie, on the nonzero pixels of frames spread across it (contrast.fit_pooled_percentiles): the tracked
-        signals to their minimum and maximum, a movie to their 0.1 and 99.9 percentiles. Limits dragged on the colorbar
+        and movie, on frames spread across it, by the rule every viewer panel takes (contrast.fit_limits). Limits dragged on the colorbar
         are kept for as long as the viewer is open; the colorbar's "Reset to fit" brings the fit back.
         """
         graphic = self._nd_image_graphics[k]
@@ -643,7 +642,7 @@ class MultiSessionDemixingVis:
         shown = (self._panel_session[k], self._panels[name].current)
         if shown not in self._contrast:
             frames = self._slice_thread.submit(sample_frames, self._panels[name]).result()
-            fit = fit_pooled_percentiles(frames=frames, percentiles=(0, 100) if shown[1] == "signals" else PERCENTILES_FIT)
+            fit = fit_limits(frames=frames)
             self._contrast[shown] = {"limits": fit, "fit": fit, "histogram": histogram_sampled(frames, *fit)}
         contrast = self._contrast[shown]
         image.vmin, image.vmax = contrast["limits"]

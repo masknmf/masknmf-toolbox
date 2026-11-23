@@ -1221,9 +1221,9 @@ def build_parser(spec: Optional[scraper.PipelineSpec], command: Optional[str] = 
     parser_view.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     parser_view.add_argument(
         "--contrast", default="sampled", choices=list(masknmf.visualization.contrast.CONTRAST_METHODS),
-        help="how each panel fits its color limits: sampled takes the 0.1-99.9 percentiles of the nonzero "
-        "pixels of 16 frames spread across "
-        "the movie, fixed opens it at vmin -0.05, vmax 1.0 without reading the movie, "
+        help="how each panel fits its color limits: sampled takes each frame's 0.1-99.9 percentiles over "
+        "its nonzero pixels, on 16 frames spread across the movie, and keeps the 10th and 90th of those across frames; "
+        "fixed opens it at vmin -0.05, vmax 1.0 without reading the movie, "
         "fastplotlib samples frames across the movie for a colorbar, first-frame takes the first frame's range; "
         "the background always takes the sampled fit",
     )
@@ -1268,9 +1268,9 @@ def build_parser(spec: Optional[scraper.PipelineSpec], command: Optional[str] = 
     parser_serve.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     parser_serve.add_argument(
         "--contrast", default="sampled", choices=list(masknmf.visualization.contrast.CONTRAST_METHODS),
-        help="how each panel fits its color limits: sampled takes the 0.1-99.9 percentiles of the nonzero "
-        "pixels of 16 frames spread across "
-        "the movie, fixed opens it at vmin -0.05, vmax 1.0 without reading the movie, "
+        help="how each panel fits its color limits: sampled takes each frame's 0.1-99.9 percentiles over "
+        "its nonzero pixels, on 16 frames spread across the movie, and keeps the 10th and 90th of those across frames; "
+        "fixed opens it at vmin -0.05, vmax 1.0 without reading the movie, "
         "fastplotlib samples frames across the movie for a colorbar, first-frame takes the first frame's range; "
         "the background always takes the sampled fit",
     )
