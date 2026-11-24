@@ -19,7 +19,7 @@ def update_signals(
     drop: Sequence[int] | None = None,
     nmf_config=None,
     device: str = "cpu",
-    frame_batch_size: int = 5000,
+    frame_batch_size: int = 50,
     merge_indices: Sequence[Sequence[int]] = (),
 ) -> DemixingResults:
     """

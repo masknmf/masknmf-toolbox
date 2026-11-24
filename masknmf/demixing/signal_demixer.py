@@ -2328,7 +2328,7 @@ class SignalDemixer:
             self,
             pmd_array,
             device: str = "cpu",
-            frame_batch_size: int = 5000,
+            frame_batch_size: int = 50,
             a: SparseCOOTensor | None = None,
             c: torch.Tensor | None = None,
             factorized_ring_term: tuple[torch.tensor, torch.tensor] | None = None,
@@ -2376,7 +2376,7 @@ class SignalDemixer:
             cls,
             results: DemixingResults,
             device: str = "cpu",
-            frame_batch_size: int = 5000,
+            frame_batch_size: int = 50,
             drop: Sequence[int] | None = None,
             merge_indices: Sequence[Sequence[int]] = (),
     ) -> "SignalDemixer":
@@ -2462,7 +2462,7 @@ class InitializingState(SignalProcessingState):
             device: str = "cpu",
             a: SparseCOOTensor | None = None,
             c: torch.Tensor | None = None,
-            frame_batch_size: int = 2000,
+            frame_batch_size: int = 50,
             factorized_ring_term: tuple[torch.Tensor, torch.Tensor] | None = None,
             robust_noise_term: float = None,
     ):
@@ -2819,7 +2819,7 @@ class DemixingState(SignalProcessingState):
             init_results: InitializationResults,
             factorized_ring_term: tuple[torch.Tensor, torch.Tensor] = None,
             device: str = "cpu",
-            frame_batch_size: int = 10000,
+            frame_batch_size: int = 50,
             robust_noise_term: float | None = None
     ):
         self._shape = compression_array.shape[1], compression_array.shape[2], compression_array.shape[0] #height, width, frames
