@@ -15,6 +15,7 @@ import torch
 import masknmf
 from masknmf.pipelines import scraper
 from masknmf.pipelines._base import BasePipeline
+from masknmf.pipelines.configs import RigidMotionCorrectionConfig
 
 SLUGS = sorted(scraper.pipeline_registry())
 
@@ -293,6 +294,50 @@ def cells_movie() -> np.ndarray:
     kernel = np.exp(-np.arange(100) / 20.0)
     traces = np.stack([np.convolve((rng.random(1500) < 0.01) * 3.0, kernel)[:1500] for _ in cells], axis=1)
     return (100 + 60 * np.einsum("tk,kyx->tyx", traces, cells) + rng.normal(0, 5, (1500, 64, 64))).astype(np.float32)
+
+
+@pytest.mark.parametrize("slug", SLUGS)
+def test_a_pixel_mask_keeps_the_masked_pixels_out_of_the_registration_and_the_compression(slug, tmp_path):
+    cls = scraper.pipeline_registry()[slug]
+    movie = cells_movie()
+    mask = np.ones(movie.shape[1:], dtype=bool)
+    mask[:, :16] = False
+    # the one photon calcium default registers piecewise, in patches larger than this movie's frames
+    kwargs_init = {"motion_correct_config": RigidMotionCorrectionConfig()} if slug == "one-photon-calcium" else {}
+    pipeline = cls(output_folder=str(tmp_path), device="cpu", **kwargs_init)
+    names = inspect.signature(cls.run).parameters
+    kwargs = {"stop_after": "compression"}
+    if "frame_rate" in names:
+        # the voltage pipeline's detrending window needs at least 60 fps
+        kwargs["frame_rate"] = 500
+    if "indicator_polarity" in names:
+        kwargs["indicator_polarity"] = "positive"
+    if slug == "glutamate-calcium-spine":
+        folder = pipeline.run(movie, None, glutamate_pixel_mask=mask, **kwargs)
+        filepath = folder / "results.glutamate.hdf5"
+    else:
+        folder = pipeline.run(movie, pixel_mask=mask, **kwargs)
+        filepath = folder / "results.hdf5"
+        # glutamate registers both channels on one reference and masks each afterwards
+        with h5py.File(filepath) as file:
+            corrector = next(name for name in file if name.endswith("MotionCorrector"))
+            assert np.array_equal(file[corrector]["pixel_weighting"][()], mask)
+    basis = masknmf.CompressionArray.from_hdf5(filepath).spatial_compressed.to_dense().cpu().numpy()
+    basis = basis.reshape(*mask.shape, -1)  ## (height, width, rank)
+    assert not basis[~mask].any() and basis[mask].any()
+    close_log(pipeline)
+
+
+@pytest.mark.parametrize("slug", [slug for slug in SLUGS if slug != "glutamate-calcium-spine"])
+def test_a_pixel_mask_of_another_shape_than_the_frames_is_refused(slug, tmp_path):
+    cls = scraper.pipeline_registry()[slug]
+    pipeline = cls(output_folder=str(tmp_path), device="cpu")
+    kwargs = {"frame_rate": 500} if "frame_rate" in inspect.signature(cls.run).parameters else {}
+    with pytest.raises(ValueError, match="pixel_mask has shape"):
+        pipeline.run(shifted_blob(), pixel_mask=np.ones((10, 10), dtype=bool), **kwargs)
+    # the voltage pipeline refuses the mask before it makes a run folder and its log
+    if pipeline.log_handler is not None:
+        close_log(pipeline)
 
 
 def test_a_resumed_run_without_a_movie_reads_the_one_its_config_records_and_skips_raw_traces_when_it_is_gone(tmp_path):
