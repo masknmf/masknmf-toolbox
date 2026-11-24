@@ -345,7 +345,8 @@ class GlutamateCalciumSpinePipeline(BasePipeline):
         if pmd_glu is not None:
             glu_pmd_demixer = masknmf.demixing.signal_demixer.SignalDemixer(
                 pmd_glu,
-                device=device)
+                device=device,
+                frame_batch_size=self.frame_batch_size)
 
             glu_pmd_demixer_results = self.run_multipass(glu_pmd_demixer, self.demixing_config, "glutamate spine demixing")
             # saved now so a failure in the steps after it still leaves the spines; written again with raw traces
@@ -383,7 +384,8 @@ class GlutamateCalciumSpinePipeline(BasePipeline):
 
                 ca_pmd_demixer = masknmf.demixing.signal_demixer.SignalDemixer(
                     pmd_ca,
-                    device=device)
+                    device=device,
+                    frame_batch_size=self.frame_batch_size)
 
                 with self.step("calcium spine demixing"):
                     ca_pmd_demixer.initialize_signals(is_custom=True,
@@ -393,7 +395,8 @@ class GlutamateCalciumSpinePipeline(BasePipeline):
                 ## Pull out global events from the calcium data
                 ca_pmd_demixer_global = masknmf.demixing.signal_demixer.SignalDemixer(
                     pmd_ca,
-                    device=device)
+                    device=device,
+                    frame_batch_size=self.frame_batch_size)
 
                 with self.step("calcium whole-dendrite demixing"):
                     ca_pmd_demixer_global.initialize_signals(is_custom=True,
@@ -421,7 +424,8 @@ class GlutamateCalciumSpinePipeline(BasePipeline):
         else: #In this case there is only a calcium channel
             ca_pmd_demixer = masknmf.demixing.signal_demixer.SignalDemixer(
                 pmd_ca,
-                device=device)
+                device=device,
+                frame_batch_size=self.frame_batch_size)
 
             ca_pmd_demixer_results = self.run_multipass(ca_pmd_demixer, self.demixing_config, "calcium spine demixing")
             # saved now so a failure in the steps after it still leaves the spines; written again with raw traces
