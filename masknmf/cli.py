@@ -791,7 +791,7 @@ def launch_viewer(
 
 def viewer_options(args: argparse.Namespace) -> list[str]:
     """The ``view`` or ``serve`` options a viewer process for one of several results files takes from this command's."""
-    options = ["--device", args.device, "--contrast", args.contrast]
+    options = ["--device", args.device]
     if args.raw_correlation:
         options.append("--raw-correlation")
     if args.fs is not None:
@@ -944,7 +944,6 @@ def open_demixing_viewer(
         raw=raw,
         registered=registered,
         canvas=canvas,
-        contrast=args.contrast,
     )
     if args.compression:
         viewer.compute_lag1_acf()
@@ -1220,12 +1219,6 @@ def build_parser(spec: Optional[scraper.PipelineSpec], command: Optional[str] = 
     )
     parser_view.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     parser_view.add_argument(
-        "--contrast", default="fixed", choices=list(masknmf.visualization.contrast.CONTRAST_METHODS),
-        help="how each panel fits its color limits: fixed opens it at vmin -0.05, vmax 1.0 without reading the movie, "
-        "fastplotlib samples frames across the movie for a colorbar, first-frame takes the first frame's range; "
-        "the background always fits the 0.1-99.9 percentiles of frames sampled across the movie",
-    )
-    parser_view.add_argument(
         "--compression",
         action="store_true",
         help="also compute the lag-1 autocorrelation images of the registered (else raw), compressed and residual movies into the Static images window (needs --raw and a compression)",
@@ -1264,12 +1257,6 @@ def build_parser(spec: Optional[scraper.PipelineSpec], command: Optional[str] = 
     parser_serve.add_argument("--fs", default=None, type=float, help="acquisition rate in Hz")
     parser_serve.add_argument("--prefix", default="", help="group the demixing results sit under, as for view")
     parser_serve.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
-    parser_serve.add_argument(
-        "--contrast", default="fixed", choices=list(masknmf.visualization.contrast.CONTRAST_METHODS),
-        help="how each panel fits its color limits: fixed opens it at vmin -0.05, vmax 1.0 without reading the movie, "
-        "fastplotlib samples frames across the movie for a colorbar, first-frame takes the first frame's range; "
-        "the background always fits the 0.1-99.9 percentiles of frames sampled across the movie",
-    )
     parser_serve.add_argument("--host", default="127.0.0.1", help="interface to listen on; there is no login, so keep localhost and tunnel")
     parser_serve.add_argument("--port", default=PORT_SERVE, type=int)
     parser_serve.add_argument(

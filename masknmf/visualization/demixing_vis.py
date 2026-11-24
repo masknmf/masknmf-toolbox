@@ -57,7 +57,8 @@ from masknmf.visualization.imgui.run_record import RECORD_LABEL, RECORD_TIP, dra
 from masknmf.visualization.imgui.scale import scale_figure
 from masknmf.visualization.rois import MARKED_COLOR, SELECTED_ALPHA, FootprintContours, FootprintSet
 from masknmf.visualization.summary_widget import SummaryImageViewer
-from masknmf.visualization.contrast import CONTRAST_BY_MOVIE, CONTRAST_METHODS, VMAX_FIXED, VMIN_FIXED, histogram_on_show
+from masknmf.visualization.imgui.colorbar import ReachColorbar
+from masknmf.visualization.contrast import fit_limits, histogram_sampled, sample_frames
 from masknmf.demixing import CellStats, estimate_temporal_demixed_raw, update_signals, write_curated
 from masknmf.diagnostics import pmd_autocovariance_diagnostics
 from masknmf.pipelines.configs.demixing_configs import NMFConfig
@@ -175,11 +176,10 @@ class SingleSessionDemixingVis:
     the drawn rois. A registration array has no compressed movie to average, so pixel traces and drawn rois
     are off for it.
     ``panel_names`` maps any of those names to the one shown in its place (panel title, Panels matrix,
-    right-click menu). ``canvas`` is the rendercanvas the figure draws on; None opens a window. ``contrast`` names
-    how each panel fits its color limits, a key of :data:`masknmf.visualization.contrast.CONTRAST_METHODS`; the
-    default, fixed, opens every panel at vmin -0.05, vmax 1.0 without reading the movie. The background always
-    takes the median, over 16 frames spread across the movie, of each frame's 0.1 and 99.9 percentiles. A colorbar
-    at each panel's right edge drags its limits.
+    right-click menu). ``canvas`` is the rendercanvas the figure draws on; None opens a window.
+    Every panel opens at the color limits of :func:`masknmf.visualization.contrast.fit_limits`, read from 16 frames
+    spread across its movie. A colorbar at each panel's right edge drags the limits, and its right-click menu takes
+    any vmin and vmax.
     The time slider runs in ``frame_timings``' unit, ``time_unit`` (shown on the traces' time axis), and each panel
     shows the frame nearest it; without ``frame_timings`` it runs over frame numbers.
 
@@ -225,12 +225,8 @@ class SingleSessionDemixingVis:
         frame_batch_size: int = 300,
         panel_names: dict[str, str] | None = None,
         canvas=None,
-        contrast: str = "fixed",
         time_unit: str | None = None,
     ):
-        if contrast not in CONTRAST_METHODS:
-            raise ValueError(f"contrast is {contrast!r}; choose from {', '.join(CONTRAST_METHODS)}")
-        self._fit_contrast = CONTRAST_METHODS[contrast]
         self._time_unit = time_unit
         self._canvas = canvas
         self._results_path = None if results_path is None else str(results_path)
@@ -498,7 +494,8 @@ class SingleSessionDemixingVis:
                 self._panel_graphics[name] = self._ndw_fov[name].add_nd_image(
                     array, ["time", "m", "n"], ["m", "n"], slider_maps={"time": frame_slider_map(frame_timings)},
                     compute_histogram=False,
-                    graphic_kwargs={"vmin": VMIN_FIXED, "vmax": VMAX_FIXED}, name=name,
+                    # NOTE: limits given here keep fastplotlib from computing its own; _fit_panel sets the real ones
+                    graphic_kwargs={"vmin": 0.0, "vmax": 1.0}, name=name,
                 )
                 self._fit_panel(name)
                 self._ndw_fov.figure[name].title = array.current
@@ -675,31 +672,26 @@ class SingleSessionDemixingVis:
         """Show movie ``name`` in ``panel``: it re-slices and refits its color limits; zoom and rois stay."""
         self._panels[panel].current = name
         self._ndw_fov.figure[panel].title = name
-        # re-slice now, not on the scheduled fetch, so the refit sees the new movie; the slicer cannot see the switch
-        # inside the SwitchableArray, so its histogram is of the old movie until recomputed
-        graphic = self._panel_graphics[panel]
-        run_sync(graphic._set_indices_())
-        if graphic.compute_histogram:
-            graphic.slicer._recompute_histogram()
+        # re-slice now, not on the scheduled fetch, so the panel shows the new movie when its limits change
+        run_sync(self._panel_graphics[panel]._set_indices_())
         self._fit_panel(panel)
 
     def _fit_panel(self, panel: str):
         """
-        Fit ``panel``'s color limits by its movie's method in CONTRAST_BY_MOVIE, else the viewer's contrast method. When
-        fastplotlib docks no colorbar, dock one over a histogram of the frame on show, so the limits can be dragged.
+        Set ``panel``'s color limits to ``fit_limits`` of frames spread across its movie, and dock a colorbar over a
+        histogram of those frames (ReachColorbar).
         """
-        graphic = self._panel_graphics[panel]
-        CONTRAST_BY_MOVIE.get(self._panels[panel].current, self._fit_contrast)(graphic)
-        if graphic.compute_histogram:
-            # fastplotlib's colorbar took the right edge
-            self._colorbars.pop(panel, None)
-            return
+        image = self._panel_graphics[panel].graphic
+        frames = sample_frames(data=self._panel_graphics[panel].data)
+        limits = fit_limits(frames=frames)
+        image.vmin, image.vmax = limits
+        histogram = histogram_sampled(frames=frames, vmin=limits[0], vmax=limits[1])
         if panel in self._colorbars:
             # NOTE: NDImage.data= replaces the graphic, so the colorbar is rebound on every fit
-            self._colorbars[panel].graphics = graphic.graphic
-            self._colorbars[panel].histogram = histogram_on_show(graphic.graphic)
+            self._colorbars[panel].graphics = image
+            self._colorbars[panel].set_fit(histogram=histogram, limits=limits)
         else:
-            self._colorbars[panel] = fpl.ui.ImguiColorbar(graphics=graphic.graphic, histogram=histogram_on_show(graphic.graphic))
+            self._colorbars[panel] = ReachColorbar(graphics=image, histogram=histogram, limits=limits)
             self._ndw_fov.figure[panel].add_imgui_window(self._colorbars[panel], location="right", size=100)
 
     def _bind_click_handlers(self):
