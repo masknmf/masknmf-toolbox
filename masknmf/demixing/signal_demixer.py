@@ -2487,7 +2487,7 @@ class InitializingState(SignalProcessingState):
             else (factorized_ring_term[0].to(self.device), factorized_ring_term[1].to(self.device))
         )
 
-        if robust_noise_term is None:
+        if robust_noise_term is None or self.factorized_ring_term is not None:
             self.robust_noise_term = self._sketch_robust_variance_term()
         else:
             self.robust_noise_term = robust_noise_term
@@ -2860,11 +2860,14 @@ class DemixingState(SignalProcessingState):
             self._validate_factorized_ring_term()
             self.background_rank = factorized_ring_term[0].shape[1]
             logger.debug(f"Background from previous iteration {self.background_rank}")
-        self.factorized_ring_term = None
+
 
         #Run after factorized ring term has been initialized
         self.robust_noise_term, self.compression_pixelwise_norms = self._sketch_robust_variance_term()
         self.compression_pixelwise_norms = self.compression_pixelwise_norms.reshape(-1)
+
+        ## We want to estimate a new ring model over each NMF pass
+        self.factorized_ring_term = None
 
 
         self.W = None
@@ -2897,6 +2900,10 @@ class DemixingState(SignalProcessingState):
         sq_cumulator = torch.zeros(self.spatial_compressed.shape[0], device=self.device)
         mean_cumulator = torch.zeros(self.spatial_compressed.shape[0], device=self.device)
         compression_pixelwise_norms = torch.zeros_like(sq_cumulator)
+        if torch.count_nonzero(self._factorized_ring_term_init[0]) == 0 and torch.count_nonzero(self._factorized_ring_term_init[1]) == 0:
+            background_exists = False
+        else:
+            background_exists = True
 
         for k in range(num_iters):
             start = k * self.pixel_batch_size
@@ -2905,8 +2912,8 @@ class DemixingState(SignalProcessingState):
             u_subset = csr_index_select_rows(self.spatial_compressed, idx)
             curr_subset = torch.sparse.mm(u_subset, self.temporal_compressed)
             compression_pixelwise_norms[start:end] = torch.linalg.norm(curr_subset, dim=1)
-            if self.factorized_ring_term is not None:
-                curr_subset -= (torch.sparse.mm(u_subset, self.factorized_ring_term[0]) @ self.factorized_ring_term[1])
+            if background_exists:
+                curr_subset -= (torch.sparse.mm(u_subset, self._factorized_ring_term_init[0]) @ self._factorized_ring_term_init[1])
             sq_cumulator[start:end] += torch.sum(curr_subset ** 2, dim=1) / self.num_frames
             mean_cumulator[start:end] = torch.sum(curr_subset, dim=1) / self.num_frames
 
