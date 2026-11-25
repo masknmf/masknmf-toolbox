@@ -2487,7 +2487,7 @@ class InitializingState(SignalProcessingState):
             else (factorized_ring_term[0].to(self.device), factorized_ring_term[1].to(self.device))
         )
 
-        if robust_noise_term is None:
+        if robust_noise_term is None or self.factorized_ring_term is not None:
             self.robust_noise_term = self._sketch_robust_variance_term()
         else:
             self.robust_noise_term = robust_noise_term
@@ -2860,11 +2860,14 @@ class DemixingState(SignalProcessingState):
             self._validate_factorized_ring_term()
             self.background_rank = factorized_ring_term[0].shape[1]
             logger.debug(f"Background from previous iteration {self.background_rank}")
-        self.factorized_ring_term = None
+
 
         #Run after factorized ring term has been initialized
         self.robust_noise_term, self.compression_pixelwise_norms = self._sketch_robust_variance_term()
         self.compression_pixelwise_norms = self.compression_pixelwise_norms.reshape(-1)
+
+        ## We want to estimate a new ring model over each NMF pass
+        self.factorized_ring_term = None
 
 
         self.W = None
